@@ -7,4 +7,4 @@ fn handle(req) {
 }
 
 print("Small JIT Web Server starting on port 9000...")
-serve(9000, "handle")
+serve(9000, handle)

@@ -53,8 +53,12 @@ pub struct Context {
     pub free_list: Mutex<Vec<u32>>,
     /// List of object IDs in the Nursery generation (used for Minor GC).
     pub nursery_ids: Mutex<Vec<u32>>,
-    /// Registered native functions mapped by their ID.
+    /// Registered native functions mapped by their string pool ID.
     pub native_fns: Vec<Option<NativeFn>>,
+    /// Maps string pool ID → index into `functions` for O(1) user-fn lookup.
+    pub fn_by_name_id: rustc_hash::FxHashMap<u32, u32>,
+    /// Maps string pool ID → index into `native_fns` for O(1) native-fn lookup.
+    pub native_by_name_id: rustc_hash::FxHashMap<u32, usize>,
     /// Tracks active register sets for all running tasks (used as GC roots).
     pub active_registers: RwLock<Vec<Arc<[AtomicU64]>>>,
     /// Set of tenured objects that point to objects in the nursery.
@@ -68,6 +72,67 @@ pub struct Context {
 }
 
 impl Context {
+    /// Returns the native function registered under the given string pool ID, if any.
+    #[inline]
+    pub fn get_native_fn(&self, name_id: u32) -> Option<NativeFn> {
+        self.native_by_name_id
+            .get(&name_id)
+            .and_then(|&idx| self.native_fns.get(idx).and_then(|f| f.clone()))
+    }
+
+    /// Returns the user function registered under the given string pool ID, if any.
+    #[inline]
+    pub fn get_user_fn(&self, name_id: u32) -> Option<crate::compiler::UserFunction> {
+        self.fn_by_name_id
+            .get(&name_id)
+            .and_then(|&idx| self.functions.get(idx as usize).cloned())
+    }
+
+    /// Resolves a `Value` to its string pool ID without any heap allocation.
+    ///
+    /// - SSO values (tag 3–9): the string is decoded and matched against the pool.
+    /// - Heap object values: the object ID is used directly as the pool ID
+    ///   (string pool entries live at the start of the heap).
+    /// - Returns `None` if the value is not a string or not found in the pool.
+    #[inline]
+    pub fn value_as_pool_id(&self, val: Value) -> Option<u32> {
+        let bits = val.to_bits();
+        let tag = (bits & crate::compiler::TAG_MASK) >> 48;
+        if (3..=9).contains(&tag) {
+            // SSO: decode bytes and scan pool (pool is small, this is fast)
+            let len = (tag - 3) as usize;
+            let mut bytes = [0u8; 6];
+            for i in 0..len {
+                bytes[i] = ((bits >> (i * 8)) & 0xFF) as u8;
+            }
+            let s = std::str::from_utf8(&bytes[..len]).ok()?;
+            self.string_pool
+                .iter()
+                .position(|p| p.as_ref() == s)
+                .map(|i| i as u32)
+        } else if let Some(oid) = val.as_obj_id() {
+            // Heap object: if it's within the string pool range it IS a pool entry
+            if (oid as usize) < self.string_pool.len() {
+                Some(oid)
+            } else {
+                // Heap string outside pool — scan pool for a match
+                let heap = self.heap.read().unwrap();
+                if let Some(Some(obj)) = heap.get(oid as usize) {
+                    if let ManagedObject::String(s) = &obj.obj {
+                        return self
+                            .string_pool
+                            .iter()
+                            .position(|p| p == s)
+                            .map(|i| i as u32);
+                    }
+                }
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     pub fn alloc(&self, obj: ManagedObject, dst: &AtomicU64) -> u32 {
         {
             let count = self.alloc_since_gc.fetch_add(1, Ordering::Relaxed);
@@ -266,7 +331,7 @@ impl Context {
         false
     }
 
-    pub fn get_string_value(&self, val: Value) -> Option<String> {
+    fn get_string_value(&self, val: Value) -> Option<String> {
         let bits = val.to_bits();
         let tag = (bits & crate::compiler::TAG_MASK) >> 48;
         if (3..=9).contains(&tag) {

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::backends::{Context, ManagedObject};
+
 /// Represents a location in the source code.
 #[derive(Debug, Clone, Copy)]
 pub struct Loc {
@@ -90,18 +92,28 @@ impl Value {
         }
     }
 
-    pub fn as_sso(&self) -> Option<String> {
-        let tag = (self.0 & TAG_MASK) >> 48;
+    pub fn as_string(&self, ctx: &Context) -> Option<String> {
+        // sso
+        let bits = self.0;
+        let tag = (bits & TAG_MASK) >> 48;
         if (3..=9).contains(&tag) {
             let len = (tag - 3) as usize;
             let mut bytes = Vec::with_capacity(len);
             for i in 0..len {
-                bytes.push(((self.0 >> (i * 8)) & 0xFF) as u8);
+                bytes.push(((bits >> (i * 8)) & 0xFF) as u8);
             }
-            Some(String::from_utf8_lossy(&bytes).to_string())
-        } else {
-            None
+            return Some(String::from_utf8_lossy(&bytes).to_string());
         }
+        // other string objects
+        if let Some(oid) = self.as_obj_id() {
+            let heap = ctx.heap.read().unwrap();
+            if let Some(Some(obj)) = heap.get(oid as usize) {
+                if let ManagedObject::String(s) = &obj.obj {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
     }
 
     #[inline(always)]
@@ -239,6 +251,14 @@ pub enum Instruction {
     /// Call a user-defined function.
     Call {
         func_id: u32,
+        args_regs: Arc<[usize]>,
+        dst: Option<usize>,
+        loc: Loc,
+    },
+    /// Call a function dynamically — the callee_reg holds a string (SSO or heap)
+    /// naming either a user function or a native function, resolved at runtime.
+    CallDynamic {
+        callee_reg: usize,
         args_regs: Arc<[usize]>,
         dst: Option<usize>,
         loc: Loc,

@@ -53,12 +53,28 @@ pub struct Parser<'source> {
     functions: Vec<crate::compiler::UserFunction>,
     /// Mapping from function names to their ID.
     function_map: FxHashMap<String, u32>,
+    /// All function names (scanned in advance) to support passing them as arguments.
+    all_function_names: std::collections::HashSet<&'source str>,
 }
 
 impl<'source> Parser<'source> {
     pub fn new(input: &'source str) -> Self {
+        let lexer = Token::lexer(input);
+        let mut all_function_names = std::collections::HashSet::new();
+        let mut temp_lex = lexer.clone();
+        while let Some(res) = temp_lex.next() {
+            if let Ok(Token::Fn) = res {
+                if let Some(Ok(Token::Identifier(id))) = temp_lex.next() {
+                    all_function_names.insert(id);
+                }
+            }
+        }
+        for name in ["print", "len", "time", "sleep", "fetch", "serve", "str"] {
+            all_function_names.insert(name);
+        }
+
         Self {
-            lexer: Token::lexer(input),
+            lexer,
             line: 1,
             line_start: 0,
             var_map: FxHashMap::default(),
@@ -72,6 +88,7 @@ impl<'source> Parser<'source> {
             spawn_start_regs: Vec::new(),
             functions: Vec::new(),
             function_map: FxHashMap::default(),
+            all_function_names,
         }
     }
 
@@ -256,6 +273,8 @@ impl<'source> Parser<'source> {
                         self.next_token(); // consume )
                     }
                     let dst = self.alloc_reg();
+
+                    // Static dispatch: known user function
                     if let Some(&func_id) = self.function_map.get(id) {
                         instructions.push(Instruction::Call {
                             func_id,
@@ -263,7 +282,27 @@ impl<'source> Parser<'source> {
                             dst: Some(dst),
                             loc: self.loc(),
                         });
+                    } else if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(id) {
+                        // Dynamic dispatch: callee is stored in a variable
+                        let callee_reg = if is_global {
+                            let r = self.alloc_reg();
+                            instructions.push(Instruction::LoadGlobal {
+                                dst: r,
+                                global: idx,
+                            });
+                            r
+                        } else {
+                            self.track_capture(idx);
+                            idx
+                        };
+                        instructions.push(Instruction::CallDynamic {
+                            callee_reg,
+                            args_regs: Arc::from(args),
+                            dst: Some(dst),
+                            loc: self.loc(),
+                        });
                     } else {
+                        // Native or unknown — resolved at runtime by name
                         let name_id = self.intern(id);
                         instructions.push(Instruction::CallNative {
                             name_id,
@@ -287,6 +326,16 @@ impl<'source> Parser<'source> {
                         self.track_capture(idx);
                         idx
                     }
+                } else if self.all_function_names.contains(id) {
+                    let val = if let Some(sso) = Value::sso(id) {
+                        sso
+                    } else {
+                        let id_intern = self.intern(id);
+                        Value::object(id_intern)
+                    };
+                    let r = self.alloc_reg();
+                    instructions.push(Instruction::LoadLiteral { dst: r, val });
+                    r
                 } else {
                     return Err(JitError::UnknownVariable(
                         id.into(),
@@ -462,6 +511,25 @@ impl<'source> Parser<'source> {
         if let Some(&func_id) = self.function_map.get(name) {
             instructions.push(Instruction::Call {
                 func_id,
+                args_regs: Arc::from(args),
+                dst: None,
+                loc,
+            });
+        } else if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(name) {
+            // Dynamic dispatch: callee is stored in a variable
+            let callee_reg = if is_global {
+                let r = self.alloc_reg();
+                instructions.push(Instruction::LoadGlobal {
+                    dst: r,
+                    global: idx,
+                });
+                r
+            } else {
+                self.track_capture(idx);
+                idx
+            };
+            instructions.push(Instruction::CallDynamic {
+                callee_reg,
                 args_regs: Arc::from(args),
                 dst: None,
                 loc,

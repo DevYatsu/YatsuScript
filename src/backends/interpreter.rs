@@ -29,9 +29,27 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
     let mut registry: rustc_hash::FxHashMap<String, NativeFn> = rustc_hash::FxHashMap::default();
     setup_native_fns(&mut registry);
 
-    // Initial heap with literal strings from the pool.
-    let mut heap_init = Vec::with_capacity(program.string_pool.len());
-    for s in program.string_pool.iter() {
+    // Build a mutable string pool so we can add native names that aren't in source.
+    let mut string_pool_vec: Vec<Arc<str>> = program.string_pool.iter().cloned().collect();
+    let mut string_pool_index: rustc_hash::FxHashMap<String, u32> = string_pool_vec
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.to_string(), i as u32))
+        .collect();
+
+    // Ensure every native function name has a string pool entry.
+    for name in registry.keys() {
+        if !string_pool_index.contains_key(name.as_str()) {
+            let id = string_pool_vec.len() as u32;
+            let arc: Arc<str> = Arc::from(name.as_str());
+            string_pool_vec.push(arc);
+            string_pool_index.insert(name.clone(), id);
+        }
+    }
+
+    // Initial heap: one entry per string pool entry (strings are tenured from birth).
+    let mut heap_init = Vec::with_capacity(string_pool_vec.len());
+    for s in &string_pool_vec {
         heap_init.push(Some(crate::backends::HeapObject {
             obj: ManagedObject::String(s.clone()),
             last_gc_id: 0,
@@ -39,22 +57,34 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
         }));
     }
 
-    let mut native_fns = vec![None; program.string_pool.len()];
-    for (name, func) in registry {
-        for (id, s) in program.string_pool.iter().enumerate() {
-            if s.as_ref() == name {
-                native_fns[id] = Some(func.clone());
-            }
+    // native_fns: indexed by string pool ID.
+    let mut native_fns: Vec<Option<NativeFn>> = vec![None; string_pool_vec.len()];
+    let mut native_by_name_id: rustc_hash::FxHashMap<u32, usize> =
+        rustc_hash::FxHashMap::default();
+    for (name, func) in &registry {
+        if let Some(&id) = string_pool_index.get(name.as_str()) {
+            native_fns[id as usize] = Some(func.clone());
+            native_by_name_id.insert(id, id as usize);
         }
     }
 
+    // fn_by_name_id: maps string pool ID → index into functions slice.
+    let mut fn_by_name_id: rustc_hash::FxHashMap<u32, u32> = rustc_hash::FxHashMap::default();
+    for (idx, func) in program.functions.iter().enumerate() {
+        fn_by_name_id.insert(func.name_id, idx as u32);
+    }
+
+    let string_pool: Arc<[Arc<str>]> = Arc::from(string_pool_vec);
+
     let ctx = Arc::new(Context {
         globals,
-        string_pool: program.string_pool.clone(),
+        string_pool,
         heap: std::sync::RwLock::new(heap_init),
         free_list: std::sync::Mutex::new(Vec::new()),
         nursery_ids: std::sync::Mutex::new(Vec::new()),
         native_fns,
+        fn_by_name_id,
+        native_by_name_id,
         active_registers: std::sync::RwLock::new(Vec::new()),
         remembered_set: std::sync::Mutex::new(rustc_hash::FxHashSet::default()),
         gc_count: std::sync::atomic::AtomicU32::new(0),
@@ -98,10 +128,8 @@ pub async fn execute_bytecode(
 ) -> Result<Value, JitError> {
     // Register for GC
     {
-        println!("DEBUG: Registering registers...");
         let mut active = ctx.active_registers.write().unwrap();
         active.push(registers.clone());
-        println!("DEBUG: Registered.");
     }
 
     // De-register on drop
@@ -167,7 +195,7 @@ pub async fn execute_bytecode(
                 let native_fn = ctx
                     .native_fns
                     .get(*name_id as usize)
-                    .and_then(|f| f.clone());
+                   .and_then(|f| f.clone());
                 if let Some(native_fn) = native_fn {
                     let mut args = Vec::with_capacity(args_regs.len());
                     for &reg in args_regs.iter() {
@@ -230,6 +258,78 @@ pub async fn execute_bytecode(
                     dst.map(|r| unsafe { registers.get_unchecked(r) }),
                 )
                 .await?;
+
+                pc += 1;
+            }
+            Instruction::CallDynamic {
+                callee_reg,
+                args_regs,
+                dst,
+                loc,
+            } => {
+                // Resolve the value in callee_reg to a string pool ID — no allocation.
+                let callee_bits =
+                    unsafe { registers.get_unchecked(*callee_reg).load(Ordering::Relaxed) };
+                let callee_val = Value::from_bits(callee_bits);
+                let name_id = ctx.value_as_pool_id(callee_val).ok_or_else(|| {
+                    JitError::Runtime(
+                        "CallDynamic: callee is not a known function name".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    )
+                })?;
+
+                // Collect args
+                let mut args_vals = Vec::with_capacity(args_regs.len());
+                for &reg in args_regs.iter() {
+                    args_vals.push(Value::from_bits(unsafe {
+                        registers.get_unchecked(reg).load(Ordering::Relaxed)
+                    }));
+                }
+
+                if let Some(native_fn) = ctx.get_native_fn(name_id) {
+                    // Native function — O(1) dispatch
+                    let res = native_fn(ctx.clone(), args_vals, *loc).await?;
+                    if let Some(dst_reg) = dst {
+                        unsafe {
+                            registers
+                                .get_unchecked(*dst_reg)
+                                .store(res.to_bits(), Ordering::Relaxed);
+                        }
+                    }
+                } else if let Some(func) = ctx.get_user_fn(name_id) {
+                    // User function — O(1) dispatch
+                    let mut f_regs_vec = Vec::with_capacity(func.locals_count);
+                    for _ in 0..func.locals_count {
+                        f_regs_vec.push(AtomicU64::new(0));
+                    }
+                    for (i, val) in args_vals.iter().enumerate() {
+                        if i < f_regs_vec.len() {
+                            f_regs_vec[i].store(val.to_bits(), Ordering::Relaxed);
+                        }
+                    }
+                    let f_regs: Arc<[AtomicU64]> = Arc::from(f_regs_vec);
+                    let _ = execute_bytecode(
+                        func.instructions.clone(),
+                        ctx.clone(),
+                        join_set,
+                        f_regs,
+                        dst.map(|r| unsafe { registers.get_unchecked(r) }),
+                    )
+                    .await?;
+                } else {
+                    return Err(JitError::Runtime(
+                        format!(
+                            "CallDynamic: unknown function '{}'",
+                            ctx.string_pool
+                                .get(name_id as usize)
+                                .map(|s| s.as_ref())
+                                .unwrap_or("?")
+                        ),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
 
                 pc += 1;
             }
@@ -717,7 +817,7 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                             ManagedObject::List(l) => return Ok(Value::number(l.len() as f64)),
                         }
                     }
-                } else if let Some(s) = val.as_sso() {
+                } else if let Some(s) = val.as_string(&ctx) {
                     return Ok(Value::number(s.len() as f64));
                 }
                 Err(JitError::Runtime(
@@ -961,8 +1061,8 @@ fn stringify_value(ctx: &Context, val: Value) -> String {
         n.to_string()
     } else if let Some(b) = val.as_bool() {
         b.to_string()
-    } else if let Some(s) = val.as_sso() {
-        s.to_string()
+    } else if let Some(s) = val.as_string(ctx) {
+        s
     } else if let Some(oid) = val.as_obj_id() {
         let heap = ctx.heap.read().unwrap();
         if let Some(Some(crate::backends::HeapObject { obj, .. })) = heap.get(oid as usize) {
@@ -990,7 +1090,7 @@ fn stringify_value(ctx: &Context, val: Value) -> String {
 }
 
 fn stringify_value_nested(ctx: &Context, val: Value) -> String {
-    if let Some(s) = val.as_sso() {
+    if let Some(s) = val.as_string(ctx) {
         format!("\"{}\"", s)
     } else if let Some(oid) = val.as_obj_id() {
         let heap = ctx.heap.read().unwrap();
