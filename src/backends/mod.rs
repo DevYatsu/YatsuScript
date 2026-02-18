@@ -44,12 +44,10 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn alloc(&self, obj: ManagedObject) -> u32 {
+    pub fn alloc(&self, obj: ManagedObject, dst: &AtomicU64) -> u32 {
         {
             let count = self.alloc_since_gc.fetch_add(1, Ordering::Relaxed);
             if count >= 10000 {
-                // Reset it early to prevent others from triggering immediately
-                // This is a simple races-are-okay heuristic
                 if self
                     .alloc_since_gc
                     .compare_exchange(count + 1, 0, Ordering::Relaxed, Ordering::Relaxed)
@@ -63,7 +61,7 @@ impl Context {
         let mut heap = self.heap.write().unwrap();
         let id = {
             let mut free_list = self.free_list.lock().unwrap();
-            if let Some(id) = free_list.pop() {
+            let id = if let Some(id) = free_list.pop() {
                 heap[id as usize] = Some(HeapObject {
                     obj,
                     last_gc_id: 0,
@@ -78,7 +76,10 @@ impl Context {
                     generation: Generation::Nursery,
                 }));
                 id
-            }
+            };
+            // Root it immediately while holding the heap lock
+            dst.store(Value::object(id).to_bits(), Ordering::Relaxed);
+            id
         };
 
         let mut nursery = self.nursery_ids.lock().unwrap();
@@ -191,6 +192,11 @@ impl Context {
     }
 
     fn trace_roots(&self, worklist: &mut Vec<u32>) {
+        // Trace string pool literals (the first N objects in the heap)
+        for i in 0..self.string_pool.len() {
+            worklist.push(i as u32);
+        }
+
         for global in &self.globals {
             let val = Value::from_bits(global.load(Ordering::Relaxed));
             if let Some(id) = val.as_obj_id() {

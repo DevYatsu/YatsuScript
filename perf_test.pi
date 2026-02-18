@@ -1,0 +1,34 @@
+fn fib(n) {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn heavy_work(iterations) {
+    el i: 0
+    el acc: 0
+    while i < iterations {
+        // High-density math
+        acc: acc + 1
+        
+        // Frequent small allocations
+        le l: [i, acc, i + acc]
+        
+        i: i + 1
+    }
+    
+    // Recursion performance
+    fib(20)
+}
+
+le num_tasks: 16
+le iterations: 100000
+
+el t: 0
+while t < num_tasks {
+    spawn {
+        heavy_work(iterations)
+    }
+    t: t + 1
+}

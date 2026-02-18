@@ -42,7 +42,9 @@ async fn main() -> Result<(), JitError> {
         }
     };
 
-    println!("Starting execution...");
+    if cfg!(debug_assertions) {
+        println!("Starting execution...");
+    }
     let start = Instant::now();
 
     let backend: Box<dyn Backend> = Box::new(backends::interpreter::Interpreter);
@@ -53,7 +55,9 @@ async fn main() -> Result<(), JitError> {
     }
 
     let total = start.elapsed();
-    println!("\nExecution completed in {:?}", total);
+    if cfg!(debug_assertions) {
+        println!("\nExecution completed in {:?}", total);
+    }
 
     Ok(())
 }
