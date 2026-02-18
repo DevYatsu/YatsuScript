@@ -27,10 +27,10 @@ impl From<(usize, usize)> for Loc {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Value(u64);
 
-const QNAN: u64 = 0x7ff0000000000000;
-const TAG_MASK: u64 = 0x000F000000000000;
-const TAG_BOOL: u64 = 0x0001000000000000;
-const TAG_OBJ: u64 = 0x0002000000000000;
+pub const QNAN: u64 = 0x7ff0000000000000;
+pub const TAG_MASK: u64 = 0x000F000000000000;
+pub const TAG_BOOL: u64 = 0x0001000000000000;
+pub const TAG_OBJ: u64 = 0x0002000000000000;
 
 impl Value {
     #[inline(always)]

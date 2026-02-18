@@ -1,12 +1,15 @@
 use crate::{
-    backends::{Backend, Context, Generation, ManagedObject, setup_native_fns},
+    backends::{Backend, Context, Generation, ManagedObject, NativeFn},
     compiler::{Instruction, Program, Value},
     error::JitError,
 };
 use std::future::Future;
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
 pub struct Interpreter;
@@ -23,7 +26,7 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
         globals.push(AtomicU64::new(0));
     }
 
-    let mut registry = rustc_hash::FxHashMap::default();
+    let mut registry: rustc_hash::FxHashMap<String, NativeFn> = rustc_hash::FxHashMap::default();
     setup_native_fns(&mut registry);
 
     // Initial heap with literal strings from the pool.
@@ -95,8 +98,10 @@ pub async fn execute_bytecode(
 ) -> Result<Value, JitError> {
     // Register for GC
     {
+        println!("DEBUG: Registering registers...");
         let mut active = ctx.active_registers.write().unwrap();
         active.push(registers.clone());
+        println!("DEBUG: Registered.");
     }
 
     // De-register on drop
@@ -376,17 +381,7 @@ pub async fn execute_bytecode(
                 let r = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
                 let lv = Value::from_bits(l);
                 let rv = Value::from_bits(r);
-                let eq = if l == r {
-                    true
-                } else if let (Some(ln), Some(rn)) = (lv.as_number(), rv.as_number()) {
-                    ln == rn
-                } else if let (Some(ls), Some(rs)) =
-                    (ctx.get_string_value(lv), ctx.get_string_value(rv))
-                {
-                    ls == rs
-                } else {
-                    false
-                };
+                let eq = ctx.values_equal(lv, rv);
                 unsafe {
                     registers
                         .get_unchecked(*dst)
@@ -404,17 +399,7 @@ pub async fn execute_bytecode(
                 let r = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
                 let lv = Value::from_bits(l);
                 let rv = Value::from_bits(r);
-                let eq = if l == r {
-                    true
-                } else if let (Some(ln), Some(rn)) = (lv.as_number(), rv.as_number()) {
-                    ln == rn
-                } else if let (Some(ls), Some(rs)) =
-                    (ctx.get_string_value(lv), ctx.get_string_value(rv))
-                {
-                    ls == rs
-                } else {
-                    false
-                };
+                let eq = ctx.values_equal(lv, rv);
                 unsafe {
                     registers
                         .get_unchecked(*dst)
@@ -692,4 +677,332 @@ pub async fn execute_bytecode(
         }
     }
     Ok(Value::from_bits(0))
+}
+
+pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
+    fns.insert(
+        "print".to_string(),
+        Arc::new(|ctx, args, _| {
+            Box::pin(async move {
+                for (i, val) in args.iter().enumerate() {
+                    if i > 0 {
+                        print!(" ");
+                    }
+                    print_value(&ctx, *val);
+                }
+                println!();
+                let _ = std::io::stdout().flush();
+                Ok(Value::from_bits(0))
+            })
+        }),
+    );
+
+    fns.insert(
+        "len".to_string(),
+        Arc::new(|ctx, args, loc| {
+            Box::pin(async move {
+                if args.len() != 1 {
+                    return Err(JitError::Runtime(
+                        "len() expects 1 argument".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                let val = args[0];
+                if let Some(oid) = val.as_obj_id() {
+                    let heap = ctx.heap.read().unwrap();
+                    if let Some(Some(obj)) = heap.get(oid as usize) {
+                        match &obj.obj {
+                            ManagedObject::String(s) => return Ok(Value::number(s.len() as f64)),
+                            ManagedObject::List(l) => return Ok(Value::number(l.len() as f64)),
+                        }
+                    }
+                } else if let Some(s) = val.as_sso() {
+                    return Ok(Value::number(s.len() as f64));
+                }
+                Err(JitError::Runtime(
+                    "len() expects string or list".into(),
+                    loc.line as usize,
+                    loc.col as usize,
+                ))
+            })
+        }),
+    );
+
+    fns.insert(
+        "time".to_string(),
+        Arc::new(|_, _, _| {
+            Box::pin(async move {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
+                Ok(Value::number(now))
+            })
+        }),
+    );
+
+    fns.insert(
+        "sleep".to_string(),
+        Arc::new(|_, args, loc| {
+            Box::pin(async move {
+                if args.len() != 1 {
+                    return Err(JitError::Runtime(
+                        "sleep() expects 1 argument".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                if let Some(ms) = args[0].as_number() {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(ms as u64)).await;
+                    Ok(Value::from_bits(0))
+                } else {
+                    Err(JitError::Runtime(
+                        "sleep() expects numeric milliseconds".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ))
+                }
+            })
+        }),
+    );
+
+    fns.insert(
+        "fetch".to_string(),
+        Arc::new(|ctx, args, loc| {
+            Box::pin(async move {
+                if args.is_empty() {
+                    return Err(JitError::Runtime(
+                        "fetch requires at least 1 argument".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                let val = args[0];
+                let url = ctx.get_string_value(val).ok_or_else(|| {
+                    JitError::Runtime(
+                        "fetch error: expected string URL".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    )
+                })?;
+
+                match reqwest::get(&url).await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Error reading body".to_string());
+                        println!("Fetch {}: {} - {}", url, status, body);
+                        Ok(Value::from_bits(0))
+                    }
+                    Err(e) => {
+                        println!("Fetch {} failed: {}", url, e);
+                        Ok(Value::from_bits(0))
+                    }
+                }
+            })
+        }),
+    );
+
+    fns.insert(
+        "serve".to_string(),
+        Arc::new(|ctx, args, loc| {
+            Box::pin(async move {
+                if args.len() != 2 {
+                    return Err(JitError::Runtime(
+                        "serve(port, handler) expects 2 arguments".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                let port = args[0].as_number().ok_or_else(|| {
+                    JitError::Runtime(
+                        "serve error: port must be a number".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    )
+                })? as u16;
+
+                let handler_name = ctx.get_string_value(args[1]).ok_or_else(|| {
+                    JitError::Runtime(
+                        "serve error: handler must be a function name string".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    )
+                })?;
+
+                let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+                    .await
+                    .map_err(|e| {
+                        JitError::Runtime(
+                            format!("Failed to bind to port {}: {}", port, e),
+                            loc.line as usize,
+                            loc.col as usize,
+                        )
+                    })?;
+
+                println!("Web server listening on port {}", port);
+
+                loop {
+                    tokio::select! {
+                        accept_res = listener.accept() => {
+                            let (mut socket, _) = accept_res.map_err(|e| {
+                                JitError::Runtime(
+                                    format!("Accept error: {}", e),
+                                    loc.line as usize,
+                                    loc.col as usize,
+                                )
+                            })?;
+
+                            let ctx = ctx.clone();
+                            let handler_name = handler_name.clone();
+
+                            tokio::spawn(async move {
+                                println!("DEBUG HTTP: Received connection");
+                                let mut buf = [0; 1024];
+                                let n = match socket.read(&mut buf).await {
+                                    Ok(n) if n > 0 => n,
+                                    _ => return,
+                                };
+
+                                let req_data = String::from_utf8_lossy(&buf[..n]).to_string();
+                                println!("DEBUG HTTP: Request data: {}", req_data);
+
+                                // Find the function by name
+                                let func = ctx.functions.iter().find(|f| {
+                                    ctx.string_pool.get(f.name_id as usize).map(|s| s.as_ref() == handler_name).unwrap_or(false)
+                                });
+
+                                if let Some(f) = func {
+                                    println!("DEBUG HTTP: Executing handler '{}'", handler_name);
+                                    let instructions = f.instructions.clone();
+                                    let mut regs = Vec::with_capacity(f.locals_count);
+                                    for _ in 0..f.locals_count {
+                                        regs.push(AtomicU64::new(0));
+                                    }
+                                    let registers: Arc<[AtomicU64]> = Arc::from(regs);
+
+                                    // Setup argument: req_data
+                                    if f.locals_count > 0 {
+                                        let val = if let Some(sso) = Value::sso(&req_data) {
+                                            sso
+                                        } else {
+                                            let temp = AtomicU64::new(0);
+                                            ctx.alloc(ManagedObject::String(Arc::from(req_data)), &temp);
+                                            Value::from_bits(temp.load(Ordering::Relaxed))
+                                        };
+                                        registers[0].store(val.to_bits(), Ordering::Relaxed);
+                                    }
+
+                                    let mut js = JoinSet::new();
+                                    match execute_bytecode(instructions, ctx.clone(), &mut js, registers, None).await {
+                                        Ok(res) => {
+                                            let resp_body = ctx.get_string_value(res).unwrap_or_else(|| "OK".into());
+                                            let full_resp = if resp_body.starts_with("HTTP/") {
+                                                resp_body
+                                            } else {
+                                                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{}", resp_body.len(), resp_body)
+                                            };
+                                            let _ = socket.write_all(full_resp.as_bytes()).await;
+                                        }
+                                        Err(e) => {
+                                            let err_msg = format!("HTTP/1.1 500 Internal Server Error\r\n\r\nError: {:?}", e);
+                                            let _ = socket.write_all(err_msg.as_bytes()).await;
+                                        }
+                                    }
+                                } else {
+                                    let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\n\r\nHandler not found").await;
+                                }
+                            });
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            println!("\nShutting down web server gracefully...");
+                            break;
+                        }
+                    }
+                }
+                Ok(Value::from_bits(0))
+            })
+        }),
+    );
+
+    fns.insert(
+        "str".to_string(),
+        Arc::new(|ctx, args, loc| {
+            Box::pin(async move {
+                if args.len() != 1 {
+                    return Err(JitError::Runtime(
+                        "str() expects 1 argument".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                let s = stringify_value(&ctx, args[0]);
+                if let Some(val) = Value::sso(&s) {
+                    Ok(val)
+                } else {
+                    let temp = AtomicU64::new(0);
+                    ctx.alloc(ManagedObject::String(Arc::from(s)), &temp);
+                    Ok(Value::from_bits(temp.load(Ordering::Relaxed)))
+                }
+            })
+        }),
+    );
+}
+
+fn print_value(ctx: &Context, val: Value) {
+    print!("{}", stringify_value(ctx, val));
+}
+
+fn stringify_value(ctx: &Context, val: Value) -> String {
+    if let Some(n) = val.as_number() {
+        n.to_string()
+    } else if let Some(b) = val.as_bool() {
+        b.to_string()
+    } else if let Some(s) = val.as_sso() {
+        s.to_string()
+    } else if let Some(oid) = val.as_obj_id() {
+        let heap = ctx.heap.read().unwrap();
+        if let Some(Some(crate::backends::HeapObject { obj, .. })) = heap.get(oid as usize) {
+            match obj {
+                ManagedObject::String(s) => s.to_string(),
+                ManagedObject::List(elements) => {
+                    let mut res = String::from("[");
+                    for (i, atomic_v) in elements.iter().enumerate() {
+                        if i > 0 {
+                            res.push_str(", ");
+                        }
+                        let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
+                        res.push_str(&stringify_value_nested(ctx, v));
+                    }
+                    res.push(']');
+                    res
+                }
+            }
+        } else {
+            "null".to_string()
+        }
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn stringify_value_nested(ctx: &Context, val: Value) -> String {
+    if let Some(s) = val.as_sso() {
+        format!("\"{}\"", s)
+    } else if let Some(oid) = val.as_obj_id() {
+        let heap = ctx.heap.read().unwrap();
+        if let Some(Some(crate::backends::HeapObject { obj, .. })) = heap.get(oid as usize) {
+            match obj {
+                ManagedObject::String(s) => format!("\"{}\"", s),
+                ManagedObject::List(_) => "[...]".to_string(),
+            }
+        } else {
+            "null".to_string()
+        }
+    } else {
+        stringify_value(ctx, val)
+    }
 }

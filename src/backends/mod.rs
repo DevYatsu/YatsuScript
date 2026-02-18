@@ -1,7 +1,6 @@
 use crate::compiler::{Loc, Program, Value};
 use crate::error::JitError;
 use std::future::Future;
-use std::io::Write;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -78,6 +77,7 @@ impl Context {
                     .compare_exchange(count + 1, 0, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
                 {
+                    println!("DEBUG: Triggering GC...");
                     self.collect_garbage();
                 }
             }
@@ -267,8 +267,15 @@ impl Context {
     }
 
     pub fn get_string_value(&self, val: Value) -> Option<String> {
-        if let Some(s) = val.as_sso() {
-            return Some(s);
+        let bits = val.to_bits();
+        let tag = (bits & crate::compiler::TAG_MASK) >> 48;
+        if (3..=9).contains(&tag) {
+            let len = (tag - 3) as usize;
+            let mut bytes = Vec::with_capacity(len);
+            for i in 0..len {
+                bytes.push(((bits >> (i * 8)) & 0xFF) as u8);
+            }
+            return Some(String::from_utf8_lossy(&bytes).to_string());
         }
         if let Some(oid) = val.as_obj_id() {
             let heap = self.heap.read().unwrap();
@@ -279,6 +286,47 @@ impl Context {
             }
         }
         None
+    }
+
+    pub fn values_equal(&self, v1: Value, v2: Value) -> bool {
+        let b1 = v1.to_bits();
+        let b2 = v2.to_bits();
+        if b1 == b2 {
+            return true;
+        }
+
+        if let (Some(n1), Some(n2)) = (v1.as_number(), v2.as_number()) {
+            return n1 == n2;
+        }
+
+        // Try SSO comparison
+        let tag1 = (b1 & crate::compiler::TAG_MASK) >> 48;
+        let tag2 = (b2 & crate::compiler::TAG_MASK) >> 48;
+
+        if (3..=9).contains(&tag1) || (3..=9).contains(&tag2) {
+            let s1 = self.get_string_value(v1);
+            let s2 = self.get_string_value(v2);
+            return match (s1, s2) {
+                (Some(s1), Some(s2)) => s1 == s2,
+                _ => false,
+            };
+        }
+
+        // Both could be heap strings
+        if let (Some(id1), Some(id2)) = (v1.as_obj_id(), v2.as_obj_id()) {
+            let heap = self.heap.read().unwrap();
+            if id1 < heap.len() as u32 && id2 < heap.len() as u32 {
+                if let (Some(o1), Some(o2)) = (&heap[id1 as usize], &heap[id2 as usize]) {
+                    if let (ManagedObject::String(s1), ManagedObject::String(s2)) =
+                        (&o1.obj, &o2.obj)
+                    {
+                        return s1 == s2;
+                    }
+                }
+            }
+        }
+
+        false
     }
 }
 
@@ -291,198 +339,3 @@ pub type NativeFn = Arc<
         + Send
         + Sync,
 >;
-
-pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
-    fns.insert(
-        "print".to_string(),
-        Arc::new(|ctx, args, _| {
-            Box::pin(async move {
-                for (i, val) in args.iter().enumerate() {
-                    if i > 0 {
-                        print!(" ");
-                    }
-                    print_value(&ctx, *val);
-                }
-                println!();
-                let _ = std::io::stdout().flush();
-                Ok(Value::from_bits(0))
-            })
-        }),
-    );
-
-    fns.insert(
-        "len".to_string(),
-        Arc::new(|ctx, args, loc| {
-            Box::pin(async move {
-                if args.len() != 1 {
-                    return Err(JitError::Runtime(
-                        "len() expects 1 argument".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                }
-                let val = args[0];
-                if let Some(oid) = val.as_obj_id() {
-                    let heap = ctx.heap.read().unwrap();
-                    if let Some(Some(obj)) = heap.get(oid as usize) {
-                        match &obj.obj {
-                            ManagedObject::String(s) => return Ok(Value::number(s.len() as f64)),
-                            ManagedObject::List(l) => return Ok(Value::number(l.len() as f64)),
-                        }
-                    }
-                } else if let Some(s) = val.as_sso() {
-                    return Ok(Value::number(s.len() as f64));
-                }
-                Err(JitError::Runtime(
-                    "len() expects string or list".into(),
-                    loc.line as usize,
-                    loc.col as usize,
-                ))
-            })
-        }),
-    );
-
-    fns.insert(
-        "time".to_string(),
-        Arc::new(|_, _, _| {
-            Box::pin(async move {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs_f64();
-                Ok(Value::number(now))
-            })
-        }),
-    );
-
-    fns.insert(
-        "sleep".to_string(),
-        Arc::new(|_, args, loc| {
-            Box::pin(async move {
-                if args.len() != 1 {
-                    return Err(JitError::Runtime(
-                        "sleep() expects 1 argument".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                }
-                if let Some(ms) = args[0].as_number() {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(ms as u64)).await;
-                    Ok(Value::from_bits(0))
-                } else {
-                    Err(JitError::Runtime(
-                        "sleep() expects numeric milliseconds".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ))
-                }
-            })
-        }),
-    );
-
-    fns.insert(
-        "fetch".to_string(),
-        Arc::new(|ctx, args, loc| {
-            Box::pin(async move {
-                if args.is_empty() {
-                    return Err(JitError::Runtime(
-                        "fetch requires at least 1 argument".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                }
-                let val = args[0];
-                let url = if let Some(s) = val.as_sso() {
-                    Arc::from(s)
-                } else if let Some(oid) = val.as_obj_id() {
-                    let heap = ctx.heap.read().unwrap();
-                    if let Some(Some(HeapObject {
-                        obj: ManagedObject::String(s),
-                        ..
-                    })) = heap.get(oid as usize)
-                    {
-                        s.clone()
-                    } else {
-                        return Err(JitError::Runtime(
-                            "fetch error: expected string URL".into(),
-                            loc.line as usize,
-                            loc.col as usize,
-                        ));
-                    }
-                } else {
-                    return Err(JitError::Runtime(
-                        "fetch error: expected string URL".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                };
-
-                match reqwest::get(url.as_ref()).await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let body = resp
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Error reading body".to_string());
-                        println!("Fetch {}: {} - {}", url, status, body);
-                        Ok(Value::from_bits(0))
-                    }
-                    Err(e) => {
-                        println!("Fetch {} failed: {}", url, e);
-                        Ok(Value::from_bits(0))
-                    }
-                }
-            })
-        }),
-    );
-}
-
-fn print_value(ctx: &Context, val: Value) {
-    if let Some(n) = val.as_number() {
-        print!("{}", n);
-    } else if let Some(b) = val.as_bool() {
-        print!("{}", b);
-    } else if let Some(s) = val.as_sso() {
-        print!("{}", s);
-    } else if let Some(oid) = val.as_obj_id() {
-        let heap = ctx.heap.read().unwrap();
-        if let Some(Some(HeapObject { obj, .. })) = heap.get(oid as usize) {
-            match obj {
-                ManagedObject::String(s) => {
-                    print!("{}", s);
-                }
-                ManagedObject::List(elements) => {
-                    print!("[");
-                    for (i, atomic_v) in elements.iter().enumerate() {
-                        if i > 0 {
-                            print!(", ");
-                        }
-                        let v = Value::from_bits(atomic_v.load(Ordering::Relaxed));
-                        print_value_nested(ctx, v);
-                    }
-                    print!("]");
-                }
-            }
-        }
-    }
-}
-
-fn print_value_nested(ctx: &Context, val: Value) {
-    if let Some(s) = val.as_sso() {
-        print!("\"{}\"", s);
-    } else if let Some(oid) = val.as_obj_id() {
-        let heap = ctx.heap.read().unwrap();
-        if let Some(Some(HeapObject { obj, .. })) = heap.get(oid as usize) {
-            match obj {
-                ManagedObject::String(s) => {
-                    print!("\"{}\"", s);
-                }
-                ManagedObject::List(_) => {
-                    print!("[...]");
-                }
-            }
-        }
-    } else {
-        print_value(ctx, val);
-    }
-}
