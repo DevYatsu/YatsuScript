@@ -11,6 +11,8 @@ pub enum JitError {
     Runtime(String, usize, usize),
     #[error("Unknown variable at {1}:{2}:  {0}")]
     UnknownVariable(String, usize, usize),
+    #[error("Redefinition of immutable variable at {1}:{2}: '{0}' was already defined on line {3}")]
+    RedefinitionOfImmutableVariable(String, usize, usize, usize),
 }
 
 impl JitError {
@@ -20,6 +22,7 @@ impl JitError {
             JitError::Parsing(_, line, col) => (*line, *col),
             JitError::Runtime(_, line, col) => (*line, *col),
             JitError::UnknownVariable(_, line, col) => (*line, *col),
+            JitError::RedefinitionOfImmutableVariable(_, line, col, _) => (*line, *col),
         }
     }
 }

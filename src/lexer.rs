@@ -21,9 +21,10 @@ impl LexingError {
     }
 }
 
-#[derive(Logos, Debug, PartialEq)]
+#[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(error(LexingError, LexingError::from_lexer))]
 #[logos(skip r"[ \t\f]+")]
+#[logos(skip r"/\*(?:[^*]|\*[^/])*\*/")]
 pub enum Token<'source> {
     #[token("el")]
     MutableVar,
@@ -33,13 +34,46 @@ pub enum Token<'source> {
     Colon,
     #[token("\n")]
     Newline,
-    #[token("printa")]
-    Print,
+    #[token("spawn")]
+    Spawn,
+    #[token("for")]
+    For,
+    #[token("while")]
+    While,
+    #[token("in")]
+    In,
+    #[token("..")]
+    Range,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
+    #[token("(")]
+    LParen,
+    #[token(")")]
+    RParen,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
+    #[token(",")]
+    Comma,
+    #[token("+")]
+    Plus,
+    #[token("-")]
+    Minus,
+    #[token("*")]
+    Mul,
+    #[token("/")]
+    Div,
     #[token("false", |_| false)]
     #[token("true", |_| true)]
     Bool(bool),
 
-    #[regex(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?", |lex| lex.slice().parse::<f64>())]
+    #[regex(
+        r"-?(?:0|[1-9]\d*)(?:_\d+)*(?:\.(?:\d+(?:_\d+)*))?(?:[eE][+-]?\d+(?:_\d+)*)?",
+        |lex| lex.slice().replace("_", "").parse::<f64>()
+    )]
     Number(f64),
 
     #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#, |lex| {
@@ -50,6 +84,9 @@ pub enum Token<'source> {
 
     #[regex(r"[[:alpha:]_][[:alnum:]_]*", |lex| lex.slice())]
     Identifier(&'source str),
+
+    #[regex(r"//[^\n]*", allow_greedy = true)]
+    LineComment,
 }
 
 impl fmt::Display for LexingError {

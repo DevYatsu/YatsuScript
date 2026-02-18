@@ -1,81 +1,490 @@
 use crate::{
-    compiler::{Op, Program, Value},
+    compiler::{Instruction, Loc, Program, Value},
     error::JitError,
 };
-use std::io::{BufWriter, Write};
+use std::future::Future;
+use std::io::Write;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::task::JoinSet;
 
-pub fn run(program: Program) -> Result<(), JitError> {
-    let stdout = std::io::stdout();
-    let mut writer = BufWriter::new(stdout.lock());
-    let mut registers: Vec<Value> = Vec::with_capacity(program.locals_count);
+/// Shared Virtul Machine State.
+pub(crate) struct Context {
+    /// Atomic global variables (NaN-Boxed bits).
+    pub(crate) globals: Vec<AtomicU64>,
+    /// Shared string pool for ID-lookup.
+    pub(crate) string_pool: Arc<[Arc<str>]>,
+    /// Global list pool.
+    pub(crate) lists: std::sync::RwLock<Vec<Arc<std::sync::RwLock<Vec<Value>>>>>,
+    /// Optimized native function lookup (maps name_id -> function).
+    native_fns: Vec<Option<NativeFn>>,
+}
 
-    // Initialize registers with dummy values or Option?
-    // Value is not Clone/Default easily without allocation if String is involved?
-    // But Value holds &'a str.
-    // Let's us `Option<Value>` for safety, or just push.
-    // The compiler assigns indices. If we encounter a Store(idx, ...), we need to ensure registers[idx] is valid.
-    // But `locals_count` is the max index + 1.
-    // We can pre-fill with a dummy value if needed, but since we are linear, we might need random access?
-    // Actually, `compile` assigns incremental indices.
-    // But wait, `var_map` reuses indices? No.
-    // `compile` says: `let idx = next_reg; var_map.insert(name, idx); next_reg += 1;`
-    // So indices are 0 to N-1.
-    // But then: `Statement::MutVar` logic: `if let Some(&idx) = var_map.get(name) { idx } else { ... }`
-    // This allows reusing the register for the *same name*.
-    // So indices are compact 0..N.
+pub type NativeFn = Arc<
+    dyn Fn(
+            Arc<Context>,
+            Vec<Value>,
+            Loc,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, JitError>> + Send>>
+        + Send
+        + Sync,
+>;
 
-    // We can resize registers.
-    registers.resize(program.locals_count, Value::Bool(false));
+pub async fn run(program: Program) -> Result<(), JitError> {
+    // Initialize lock-free globals with 0 (which is an empty double).
+    let mut globals = Vec::with_capacity(program.globals_count);
+    for _ in 0..program.globals_count {
+        globals.push(AtomicU64::new(0));
+    }
 
-    for op in program.ops {
-        match op {
-            Op::Print(expr, (line, col)) => {
-                let val = eval_expr(&expr, &registers, (line, col))?;
-                match val {
-                    Value::Number(n) => write!(writer, "{}", n),
-                    Value::String(s) => write!(writer, "{}", s),
-                    Value::Bool(b) => write!(writer, "{}", b),
-                }
-                .map_err(|e| JitError::Runtime(format!("IO Error: {}", e), line, col))?;
-                writeln!(writer)
-                    .map_err(|e| JitError::Runtime(format!("IO Error: {}", e), line, col))?;
-            }
-            Op::Store(idx, expr, (line, col)) => {
-                let val = eval_expr(&expr, &registers, (line, col))?;
-                if let Some(reg) = registers.get_mut(idx) {
-                    *reg = val;
-                } else {
-                    return Err(JitError::Runtime(
-                        format!("Register index out of bounds: {}", idx),
-                        line,
-                        col,
-                    ));
-                }
+    let mut registry = rustc_hash::FxHashMap::default();
+    setup_native_fns(&mut registry);
+
+    // Bake registry into a dense Vec for O(1) lookup during execution.
+    let mut native_fns = vec![None; program.string_pool.len()];
+    for (name, func) in registry {
+        for (id, s) in program.string_pool.iter().enumerate() {
+            if s.as_ref() == name {
+                native_fns[id] = Some(func.clone());
             }
         }
     }
 
-    writer
-        .flush()
-        .map_err(|e| JitError::Runtime(format!("IO Error: {}", e), 0, 0))?;
+    let ctx = Arc::new(Context {
+        globals,
+        string_pool: program.string_pool.clone(),
+        lists: std::sync::RwLock::new(Vec::new()),
+        native_fns,
+    });
+
+    let mut registers = vec![Value::from_bits(0); program.locals_count];
+    let mut join_set = JoinSet::new();
+
+    execute_bytecode(
+        program.instructions.clone(),
+        ctx.clone(),
+        &mut join_set,
+        &mut registers,
+    )
+    .await?;
+
+    // Collect all background tasks.
+    while let Some(res) = join_set.join_next().await {
+        if let Ok(Err(e)) = res {
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
-#[inline(always)]
-fn eval_expr<'a>(
-    expr: &crate::compiler::CompiledExpr<'a>,
-    registers: &[Value<'a>],
-    loc: (usize, usize),
-) -> Result<Value<'a>, JitError> {
-    match expr {
-        crate::compiler::CompiledExpr::Literal(val) => Ok(*val),
-        crate::compiler::CompiledExpr::Var(idx) => match registers.get(*idx) {
-            Some(val) => Ok(*val),
-            None => Err(JitError::Runtime(
-                format!("Register index out of bounds: {}", idx),
-                loc.0,
-                loc.1,
-            )),
-        },
+#[async_recursion::async_recursion]
+async fn execute_bytecode(
+    instructions: Arc<[Instruction]>,
+    ctx: Arc<Context>,
+    join_set: &mut JoinSet<Result<(), JitError>>,
+    registers: &mut Vec<Value>,
+) -> Result<(), JitError> {
+    let mut pc = 0;
+
+    while pc < instructions.len() {
+        let instr = unsafe { instructions.get_unchecked(pc) };
+
+        match instr {
+            Instruction::LoadLiteral { dst, val } => {
+                unsafe {
+                    *registers.get_unchecked_mut(*dst) = *val;
+                }
+                pc += 1;
+            }
+            Instruction::Move { dst, src } => {
+                let val = unsafe { *registers.get_unchecked(*src) };
+                unsafe {
+                    *registers.get_unchecked_mut(*dst) = val;
+                }
+                pc += 1;
+            }
+            Instruction::LoadGlobal { dst, global } => {
+                let bits = unsafe { ctx.globals.get_unchecked(*global).load(Ordering::Relaxed) };
+                unsafe {
+                    *registers.get_unchecked_mut(*dst) = Value::from_bits(bits);
+                }
+                pc += 1;
+            }
+            Instruction::StoreGlobal { global, src } => {
+                let bits = unsafe { registers.get_unchecked(*src).to_bits() };
+                unsafe {
+                    ctx.globals
+                        .get_unchecked(*global)
+                        .store(bits, Ordering::Relaxed);
+                }
+                pc += 1;
+            }
+            Instruction::CallNative {
+                name_id,
+                args_regs,
+                dst,
+                loc,
+            } => {
+                if let Some(native_fn) = unsafe { ctx.native_fns.get_unchecked(*name_id as usize) }
+                {
+                    let mut args = Vec::with_capacity(args_regs.len());
+                    for &reg in args_regs.iter() {
+                        args.push(unsafe { *registers.get_unchecked(reg) });
+                    }
+
+                    let res = native_fn(ctx.clone(), args, *loc).await?;
+                    if let Some(dst_reg) = dst {
+                        unsafe {
+                            *registers.get_unchecked_mut(*dst_reg) = res;
+                        }
+                    }
+                } else {
+                    let name = &ctx.string_pool[*name_id as usize];
+                    return Err(JitError::Runtime(
+                        format!("Unknown native function: {}", name),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::Jump(target) => pc = *target,
+            Instruction::JumpIfFalse { cond, target } => {
+                let val = unsafe { registers.get_unchecked(*cond) };
+                if let Some(false) = val.as_bool() {
+                    pc = *target;
+                } else {
+                    pc += 1;
+                }
+            }
+            Instruction::Add { dst, lhs, rhs, loc } => {
+                let l = unsafe { registers.get_unchecked(*lhs) };
+                let r = unsafe { registers.get_unchecked(*rhs) };
+                if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
+                    unsafe {
+                        *registers.get_unchecked_mut(*dst) = Value::number(lv + rv);
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Math error: expected numbers".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::Sub { dst, lhs, rhs, loc } => {
+                let l = unsafe { registers.get_unchecked(*lhs) };
+                let r = unsafe { registers.get_unchecked(*rhs) };
+                if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
+                    unsafe {
+                        *registers.get_unchecked_mut(*dst) = Value::number(lv - rv);
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Math error: expected numbers".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::Mul { dst, lhs, rhs, loc } => {
+                let l = unsafe { registers.get_unchecked(*lhs) };
+                let r = unsafe { registers.get_unchecked(*rhs) };
+                if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
+                    unsafe {
+                        *registers.get_unchecked_mut(*dst) = Value::number(lv * rv);
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Math error: expected numbers".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::Div { dst, lhs, rhs, loc } => {
+                let l = unsafe { registers.get_unchecked(*lhs) };
+                let r = unsafe { registers.get_unchecked(*rhs) };
+                if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
+                    unsafe {
+                        *registers.get_unchecked_mut(*dst) = Value::number(lv / rv);
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Math error: expected numbers".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::Increment(reg) => {
+                if let Some(n) = unsafe { registers.get_unchecked_mut(*reg) }.as_number() {
+                    unsafe {
+                        *registers.get_unchecked_mut(*reg) = Value::number(n + 1.0);
+                    }
+                }
+                pc += 1;
+            }
+            Instruction::LessThan { dst, lhs, rhs, loc } => {
+                let l = unsafe { registers.get_unchecked(*lhs) };
+                let r = unsafe { registers.get_unchecked(*rhs) };
+                if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
+                    unsafe {
+                        *registers.get_unchecked_mut(*dst) = Value::bool(lv < rv);
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Compare error: expected numbers".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::NewList { dst, len } => {
+                let list = vec![Value::from_bits(0); *len];
+                let list_arc = Arc::new(std::sync::RwLock::new(list));
+                let mut lists = ctx.lists.write().unwrap();
+                let id = lists.len() as u32;
+                lists.push(list_arc);
+                unsafe {
+                    *registers.get_unchecked_mut(*dst) = Value::list_id(id);
+                }
+                pc += 1;
+            }
+            Instruction::ListGet {
+                dst,
+                list,
+                index_reg,
+                loc,
+            } => {
+                let list_val = unsafe { *registers.get_unchecked(*list) };
+                let index_val = unsafe { *registers.get_unchecked(*index_reg) };
+                let index = index_val.as_number().map(|n| n as usize).ok_or_else(|| {
+                    JitError::Runtime(
+                        "List index must be a number".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    )
+                })?;
+
+                if let Some(lid) = list_val.as_list_id() {
+                    let lists = ctx.lists.read().unwrap();
+                    if let Some(list_arc) = lists.get(lid as usize) {
+                        let list = list_arc.read().unwrap();
+                        if let Some(val) = list.get(index) {
+                            unsafe {
+                                *registers.get_unchecked_mut(*dst) = *val;
+                            }
+                        } else {
+                            return Err(JitError::Runtime(
+                                format!(
+                                    "Index out of bounds: {} for list of length {}",
+                                    index,
+                                    list.len()
+                                ),
+                                loc.line as usize,
+                                loc.col as usize,
+                            ));
+                        }
+                    } else {
+                        return Err(JitError::Runtime(
+                            "Invalid list ID".into(),
+                            loc.line as usize,
+                            loc.col as usize,
+                        ));
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Expected list for indexing".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::ListSet {
+                list,
+                index_reg,
+                src,
+                loc,
+            } => {
+                let list_val = unsafe { *registers.get_unchecked(*list) };
+                let index_val = unsafe { *registers.get_unchecked(*index_reg) };
+                let val = unsafe { *registers.get_unchecked(*src) };
+                let index = index_val.as_number().map(|n| n as usize).ok_or_else(|| {
+                    JitError::Runtime(
+                        "List index must be a number".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    )
+                })?;
+
+                if let Some(lid) = list_val.as_list_id() {
+                    let lists = ctx.lists.read().unwrap();
+                    if let Some(list_arc) = lists.get(lid as usize) {
+                        let mut list = list_arc.write().unwrap();
+                        if let Some(slot) = list.get_mut(index) {
+                            *slot = val;
+                        } else {
+                            return Err(JitError::Runtime(
+                                format!(
+                                    "Index out of bounds: {} for list of length {}",
+                                    index,
+                                    list.len()
+                                ),
+                                loc.line as usize,
+                                loc.col as usize,
+                            ));
+                        }
+                    } else {
+                        return Err(JitError::Runtime(
+                            "Invalid list ID".into(),
+                            loc.line as usize,
+                            loc.col as usize,
+                        ));
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Expected list for indexing".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::Spawn {
+                instructions: body,
+                locals_count,
+            } => {
+                let body = Arc::clone(body);
+                let count = *locals_count;
+                let s_ctx = ctx.clone();
+                let mut thread_regs = registers.clone();
+                if thread_regs.len() < count {
+                    thread_regs.resize(count, Value::from_bits(0));
+                }
+
+                join_set.spawn(async move {
+                    let mut js = JoinSet::new();
+                    execute_bytecode(body, s_ctx, &mut js, &mut thread_regs).await?;
+                    while let Some(res) = js.join_next().await {
+                        if let Ok(Err(e)) = res {
+                            return Err(e);
+                        }
+                    }
+                    Ok(())
+                });
+                pc += 1;
+            }
+        }
+        if pc & 0x1FF == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    Ok(())
+}
+
+fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
+    fns.insert(
+        "print".to_string(),
+        Arc::new(|ctx, args, _| {
+            Box::pin(async move {
+                let mut stdout = std::io::stdout().lock();
+                for (i, val) in args.iter().enumerate() {
+                    if i > 0 {
+                        let _ = write!(stdout, " ");
+                    }
+                    print_value(&mut stdout, &ctx, *val);
+                }
+                let _ = writeln!(stdout);
+                let _ = stdout.flush();
+                Ok(Value::from_bits(0))
+            })
+        }),
+    );
+
+    fns.insert(
+        "fetch".to_string(),
+        Arc::new(|ctx, args, loc| {
+            Box::pin(async move {
+                if args.is_empty() {
+                    return Err(JitError::Runtime(
+                        "fetch requires at least 1 argument".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                let val = args[0];
+                if let Some(sid) = val.as_string_id() {
+                    let url = &ctx.string_pool[sid as usize];
+                    match reqwest::get(url.as_ref()).await {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            let body = resp
+                                .text()
+                                .await
+                                .unwrap_or_else(|_| "Error reading body".to_string());
+                            let mut stdout = std::io::stdout().lock();
+                            let _ = writeln!(stdout, "Fetch {}: {} - {}", url, status, body);
+                            let _ = stdout.flush();
+                            Ok(Value::from_bits(0))
+                        }
+                        Err(e) => {
+                            let mut stdout = std::io::stdout().lock();
+                            let _ = writeln!(stdout, "Fetch {} failed: {}", url, e);
+                            let _ = stdout.flush();
+                            Ok(Value::from_bits(0))
+                        }
+                    }
+                } else {
+                    Err(JitError::Runtime(
+                        "fetch error: expected string URL".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ))
+                }
+            })
+        }),
+    );
+}
+
+fn print_value(stdout: &mut std::io::StdoutLock, ctx: &Context, val: Value) {
+    if let Some(n) = val.as_number() {
+        let _ = write!(stdout, "{}", n);
+    } else if let Some(b) = val.as_bool() {
+        let _ = write!(stdout, "{}", b);
+    } else if let Some(sid) = val.as_string_id() {
+        let s = &ctx.string_pool[sid as usize];
+        let _ = write!(stdout, "{}", s);
+    } else if let Some(lid) = val.as_list_id() {
+        let lists = ctx.lists.read().unwrap();
+        if let Some(list_arc) = lists.get(lid as usize) {
+            let list = list_arc.read().unwrap();
+            let _ = write!(stdout, "[");
+            for (i, v) in list.iter().enumerate() {
+                if i > 0 {
+                    let _ = write!(stdout, ", ");
+                }
+                print_value_nested(stdout, ctx, *v);
+            }
+            let _ = write!(stdout, "]");
+        }
+    }
+}
+
+fn print_value_nested(stdout: &mut std::io::StdoutLock, ctx: &Context, val: Value) {
+    if let Some(sid) = val.as_string_id() {
+        let s = &ctx.string_pool[sid as usize];
+        let _ = write!(stdout, "\"{}\"", s);
+    } else if val.as_list_id().is_some() {
+        let _ = write!(stdout, "[...]");
+    } else {
+        print_value(stdout, ctx, val);
     }
 }

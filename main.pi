@@ -1,9 +1,14 @@
+print("--- Extensible API Demo ---")
 
-le test: "string value"
-el value: test
-el name_mut: value
-le name_immutable: 22
-le v2: "str "
+spawn {
+    print "Task 1: Concurrent print"
+}
 
-printa 33
-printa name_mut
+spawn {
+    print("Task 2: Parenthesized print")
+}
+
+le my_list: [1, 2, 3]
+print("My list:", my_list)
+
+print "Fetching..."
