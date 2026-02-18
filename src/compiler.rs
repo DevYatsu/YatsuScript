@@ -89,7 +89,7 @@ impl Value {
 
     pub fn as_sso(&self) -> Option<String> {
         let tag = (self.0 & TAG_MASK) >> 48;
-        if tag >= 3 && tag <= 9 {
+        if (3..=9).contains(&tag) {
             let len = (tag - 3) as usize;
             let mut bytes = Vec::with_capacity(len);
             for i in 0..len {
@@ -160,16 +160,19 @@ pub enum Instruction {
         loc: Loc,
     },
     Increment(usize),
+    IncrementGlobal(usize),
     Eq {
         dst: usize,
         lhs: usize,
         rhs: usize,
+        #[allow(dead_code)]
         loc: Loc,
     },
     Ne {
         dst: usize,
         lhs: usize,
         rhs: usize,
+        #[allow(dead_code)]
         loc: Loc,
     },
     Lt {
@@ -227,15 +230,18 @@ pub enum Instruction {
         func_id: u32,
         args_regs: Arc<[usize]>,
         dst: Option<usize>,
+        loc: Loc,
     },
     Return(Option<usize>),
 }
 
 #[derive(Debug, Clone)]
 pub struct UserFunction {
+    #[allow(dead_code)]
     pub name_id: u32,
     pub instructions: Arc<[Instruction]>,
     pub locals_count: usize,
+    #[allow(dead_code)]
     pub params_count: usize,
 }
 

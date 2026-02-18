@@ -6,7 +6,11 @@ mod parser;
 
 use crate::backends::Backend;
 use crate::error::JitError;
+use mimalloc::MiMalloc;
 use std::time::Instant;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
 async fn main() -> Result<(), JitError> {
@@ -19,11 +23,7 @@ async fn main() -> Result<(), JitError> {
         return Ok(());
     }
 
-    let backend_name: String = args
-        .opt_value_from_str(["-b", "--backend"])
-        .map_err(|e| JitError::Runtime(format!("Argument error: {}", e), 0, 0))?
-        .or_else(|| std::env::var("JIT_BACKEND").ok())
-        .unwrap_or_else(|| "interpreter".to_string());
+    let _backend: Option<String> = args.opt_value_from_str(["-b", "--backend"]).ok().flatten();
 
     let file_path: String = args
         .free_from_str()
@@ -42,26 +42,18 @@ async fn main() -> Result<(), JitError> {
         }
     };
 
-    println!("Compiled program: {} instructions, {} functions", program.instructions.len(), program.functions.len());
-
+    println!("Starting execution...");
     let start = Instant::now();
 
     let backend: Box<dyn Backend> = Box::new(backends::interpreter::Interpreter);
 
-    println!(
-        "--- Running {} with Backend: {} ---",
-        file_path, backend_name
-    );
     if let Err(e) = backend.run(program).await {
         print_error(&content, &e);
         std::process::exit(1);
     }
 
     let total = start.elapsed();
-
-    println!("\n--- Execution Results (Tokio Green Threads) ---");
-    println!("Total execution time: {:?}", total);
-    println!("-----------------------------------------------");
+    println!("\nExecution completed in {:?}", total);
 
     Ok(())
 }

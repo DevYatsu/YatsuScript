@@ -1,6 +1,8 @@
 print("--- Extensible API Demo ---")
 
-spawn {
+le time_start: time()
+
+spawn { 
     print "Task 1: Concurrent print"
 }
 
@@ -11,4 +13,4 @@ spawn {
 le my_list: [1, 2, 3]
 print("My list:", my_list)
 
-print "Fetching..."
+print ("Done in", (time() - time_start) * 1_000_000, "microseconds")

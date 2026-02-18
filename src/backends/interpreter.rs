@@ -31,7 +31,7 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
     for s in program.string_pool.iter() {
         heap_init.push(Some(crate::backends::HeapObject {
             obj: ManagedObject::String(s.clone()),
-            marked: false,
+            last_gc_id: 0,
             generation: Generation::Tenured,
         }));
     }
@@ -50,10 +50,12 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
         string_pool: program.string_pool.clone(),
         heap: std::sync::RwLock::new(heap_init),
         free_list: std::sync::Mutex::new(Vec::new()),
+        nursery_ids: std::sync::Mutex::new(Vec::new()),
         native_fns,
         active_registers: std::sync::RwLock::new(Vec::new()),
         remembered_set: std::sync::Mutex::new(rustc_hash::FxHashSet::default()),
-        gc_count: std::sync::Mutex::new(0),
+        gc_count: std::sync::atomic::AtomicU32::new(0),
+        alloc_since_gc: std::sync::atomic::AtomicUsize::new(0),
         functions: program.functions.clone(),
     });
 
@@ -112,8 +114,10 @@ pub async fn execute_bytecode(
     };
 
     let mut pc = 0;
+    let mut instr_count: u32 = 0;
     while pc < instructions.len() {
-        let instr = unsafe { instructions.get_unchecked(pc) };
+        let instr = &instructions[pc];
+        instr_count = instr_count.wrapping_add(1);
 
         match instr {
             Instruction::LoadLiteral { dst, val } => {
@@ -145,7 +149,10 @@ pub async fn execute_bytecode(
                 dst,
                 loc,
             } => {
-                let native_fn = unsafe { ctx.native_fns.get_unchecked(*name_id as usize) }.clone();
+                let native_fn = ctx
+                    .native_fns
+                    .get(*name_id as usize)
+                    .and_then(|f| f.clone());
                 if let Some(native_fn) = native_fn {
                     let mut args = Vec::with_capacity(args_regs.len());
                     for &reg in args_regs.iter() {
@@ -170,8 +177,20 @@ pub async fn execute_bytecode(
                 func_id,
                 args_regs,
                 dst,
+                loc,
             } => {
-                let func = unsafe { ctx.functions.get_unchecked(*func_id as usize) }.clone();
+                let func = ctx.functions.get(*func_id as usize).cloned().unwrap();
+                if args_regs.len() != func.params_count {
+                    return Err(JitError::Runtime(
+                        format!(
+                            "Function call arity mismatch: expected {}, got {}",
+                            func.params_count,
+                            args_regs.len()
+                        ),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
                 let mut f_regs_vec = Vec::with_capacity(func.locals_count);
                 for _ in 0..func.locals_count {
                     f_regs_vec.push(AtomicU64::new(0));
@@ -265,13 +284,32 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Increment(reg) => {
-                let bits = registers[*reg].load(Ordering::Relaxed);
-                if let Some(n) = Value::from_bits(bits).as_number() {
-                    registers[*reg].store(Value::number(n + 1.0).to_bits(), Ordering::Relaxed);
-                }
+                let _ =
+                    registers[*reg].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+                        let val = Value::from_bits(bits);
+                        val.as_number().map(|n| Value::number(n + 1.0).to_bits())
+                    });
                 pc += 1;
             }
-            Instruction::Eq { dst, lhs, rhs, .. } => {
+            Instruction::IncrementGlobal(global) => {
+                let _ = unsafe {
+                    ctx.globals.get_unchecked(*global).fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |bits| {
+                            let val = Value::from_bits(bits);
+                            val.as_number().map(|n| Value::number(n + 1.0).to_bits())
+                        },
+                    )
+                };
+                pc += 1;
+            }
+            Instruction::Eq {
+                dst,
+                lhs,
+                rhs,
+                loc: _,
+            } => {
                 let l = registers[*lhs].load(Ordering::Relaxed);
                 let r = registers[*rhs].load(Ordering::Relaxed);
                 // Simple bitwise equality for EQ/NE since our tags and values are canonical
@@ -287,7 +325,12 @@ pub async fn execute_bytecode(
                 registers[*dst].store(Value::bool(eq).to_bits(), Ordering::Relaxed);
                 pc += 1;
             }
-            Instruction::Ne { dst, lhs, rhs, .. } => {
+            Instruction::Ne {
+                dst,
+                lhs,
+                rhs,
+                loc: _,
+            } => {
                 let l = registers[*lhs].load(Ordering::Relaxed);
                 let r = registers[*rhs].load(Ordering::Relaxed);
                 let lv = Value::from_bits(l);
@@ -447,10 +490,10 @@ pub async fn execute_bytecode(
                                     let src_val = Value::from_bits(src_bits);
                                     if let Some(src_oid) = src_val.as_obj_id() {
                                         let src_obj_opt = heap.get(src_oid as usize);
-                                        if let Some(Some(src_obj)) = src_obj_opt {
-                                            if src_obj.generation == Generation::Nursery {
-                                                ctx.remembered_set.lock().unwrap().insert(oid);
-                                            }
+                                        if let Some(Some(src_obj)) = src_obj_opt
+                                            && src_obj.generation == Generation::Nursery
+                                        {
+                                            ctx.remembered_set.lock().unwrap().insert(oid);
                                         }
                                     }
                                 }
@@ -520,7 +563,7 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
         }
-        if pc & 0x1FF == 0 {
+        if instr_count & 0x3FF == 0 {
             tokio::task::yield_now().await;
         }
     }

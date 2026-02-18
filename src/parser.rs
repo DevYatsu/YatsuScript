@@ -26,6 +26,7 @@ pub struct Parser<'source> {
     next_reg: usize,
     next_global: usize,
     is_in_spawn: bool,
+    is_in_function: bool,
     captures_stack: Vec<std::collections::HashSet<usize>>,
     spawn_start_regs: Vec<usize>,
     functions: Vec<crate::compiler::UserFunction>,
@@ -44,6 +45,7 @@ impl<'source> Parser<'source> {
             next_reg: 0,
             next_global: 0,
             is_in_spawn: false,
+            is_in_function: false,
             captures_stack: Vec::new(),
             spawn_start_regs: Vec::new(),
             functions: Vec::new(),
@@ -237,6 +239,7 @@ impl<'source> Parser<'source> {
                             func_id,
                             args_regs: Arc::from(args),
                             dst: Some(dst),
+                            loc: self.loc(),
                         });
                     } else {
                         let name_id = self.intern(id);
@@ -439,6 +442,7 @@ impl<'source> Parser<'source> {
                 func_id,
                 args_regs: Arc::from(args),
                 dst: None,
+                loc,
             });
         } else {
             let name_id = self.intern(name);
@@ -559,7 +563,7 @@ impl<'source> Parser<'source> {
             ));
         }
 
-        let is_global = !self.is_in_spawn;
+        let is_global = !self.is_in_function && !self.is_in_spawn;
         let idx = if is_global {
             let i = self.next_global;
             self.next_global += 1;
@@ -762,9 +766,11 @@ impl<'source> Parser<'source> {
         let old_next_reg = self.next_reg;
         let old_is_in_spawn = self.is_in_spawn;
 
+        let old_is_in_function = self.is_in_function;
         self.var_map.clear();
         self.next_reg = 0;
         self.is_in_spawn = false;
+        self.is_in_function = true;
 
         for &p in &params {
             let r = self.alloc_reg();
@@ -797,6 +803,7 @@ impl<'source> Parser<'source> {
         self.var_map = old_vars;
         self.next_reg = old_next_reg;
         self.is_in_spawn = old_is_in_spawn;
+        self.is_in_function = old_is_in_function;
 
         Ok(())
     }
