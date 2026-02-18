@@ -25,6 +25,7 @@ impl From<(usize, usize)> for Loc {
 pub struct Value(u64);
 
 const QNAN: u64 = 0x7ffc000000000000;
+const TAG_MASK: u64 = 0x000F000000000000;
 const TAG_BOOL: u64 = 0x0001000000000000;
 const TAG_STR: u64 = 0x0002000000000000;
 const TAG_LIST: u64 = 0x0003000000000000;
@@ -56,7 +57,7 @@ impl Value {
 
     #[inline(always)]
     pub fn as_bool(self) -> Option<bool> {
-        if (self.0 & (QNAN | TAG_BOOL)) == (QNAN | TAG_BOOL) {
+        if (self.0 & (QNAN | TAG_MASK)) == (QNAN | TAG_BOOL) {
             Some((self.0 & 1) != 0)
         } else {
             None
@@ -65,7 +66,7 @@ impl Value {
 
     #[inline(always)]
     pub fn as_string_id(self) -> Option<u32> {
-        if (self.0 & (QNAN | TAG_STR)) == (QNAN | TAG_STR) {
+        if (self.0 & (QNAN | TAG_MASK)) == (QNAN | TAG_STR) {
             Some((self.0 & 0xFFFFFFFF) as u32)
         } else {
             None
@@ -79,7 +80,7 @@ impl Value {
 
     #[inline(always)]
     pub fn as_list_id(self) -> Option<u32> {
-        if (self.0 & (QNAN | TAG_LIST)) == (QNAN | TAG_LIST) {
+        if (self.0 & (QNAN | TAG_MASK)) == (QNAN | TAG_LIST) {
             Some((self.0 & 0xFFFFFFFF) as u32)
         } else {
             None
