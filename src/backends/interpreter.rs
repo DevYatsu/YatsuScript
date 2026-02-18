@@ -497,28 +497,54 @@ pub async fn execute_bytecode(
             }
             Instruction::Increment(reg) => {
                 let reg_ptr = unsafe { registers.get_unchecked(*reg) };
-                let bits = reg_ptr.load(Ordering::Relaxed);
-                if (bits & QNAN) != QNAN {
-                    let n = f64::from_bits(bits);
-                    reg_ptr.store(Value::number(n + 1.0).to_bits(), Ordering::Relaxed);
-                } else {
-                    let val = Value::from_bits(bits);
-                    if let Some(n) = val.as_number() {
-                        reg_ptr.store(Value::number(n + 1.0).to_bits(), Ordering::Relaxed);
+                let mut old_bits = reg_ptr.load(Ordering::Relaxed);
+                loop {
+                    let next_bits = if (old_bits & QNAN) != QNAN {
+                        let n = f64::from_bits(old_bits);
+                        Value::number(n + 1.0).to_bits()
+                    } else {
+                        let val = Value::from_bits(old_bits);
+                        if let Some(n) = val.as_number() {
+                            Value::number(n + 1.0).to_bits()
+                        } else {
+                            break;
+                        }
+                    };
+                    match reg_ptr.compare_exchange_weak(
+                        old_bits,
+                        next_bits,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => old_bits = actual,
                     }
                 }
                 pc += 1;
             }
             Instruction::IncrementGlobal(global) => {
                 let global_ptr = unsafe { ctx.globals.get_unchecked(*global) };
-                let bits = global_ptr.load(Ordering::Relaxed);
-                if (bits & QNAN) != QNAN {
-                    let n = f64::from_bits(bits);
-                    global_ptr.store(Value::number(n + 1.0).to_bits(), Ordering::Relaxed);
-                } else {
-                    let val = Value::from_bits(bits);
-                    if let Some(n) = val.as_number() {
-                        global_ptr.store(Value::number(n + 1.0).to_bits(), Ordering::Relaxed);
+                let mut old_bits = global_ptr.load(Ordering::Relaxed);
+                loop {
+                    let next_bits = if (old_bits & QNAN) != QNAN {
+                        let n = f64::from_bits(old_bits);
+                        Value::number(n + 1.0).to_bits()
+                    } else {
+                        let val = Value::from_bits(old_bits);
+                        if let Some(n) = val.as_number() {
+                            Value::number(n + 1.0).to_bits()
+                        } else {
+                            break;
+                        }
+                    };
+                    match global_ptr.compare_exchange_weak(
+                        old_bits,
+                        next_bits,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => old_bits = actual,
                     }
                 }
                 pc += 1;
