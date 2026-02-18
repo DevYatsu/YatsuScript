@@ -20,6 +20,12 @@ struct VarInfo {
     first_line: usize,
 }
 
+#[derive(Clone, Copy)]
+enum Accessor {
+    Index(usize),
+    Field(u32),
+}
+
 /// The Parser transforms source code into a compiled Program (bytecode).
 ///
 /// It performs lexical analysis (via Lexer), handles variable scoping,
@@ -145,6 +151,15 @@ impl<'source> Parser<'source> {
         tok
     }
 
+    fn skip_newlines(&mut self) {
+        while matches!(
+            self.peek(),
+            Some(Ok(Token::Newline)) | Some(Ok(Token::LineComment))
+        ) {
+            self.next_token();
+        }
+    }
+
     fn expect(&mut self) -> Result<Token<'source>, JitError> {
         let loc = self.loc();
         match self.next_token() {
@@ -209,7 +224,7 @@ impl<'source> Parser<'source> {
     fn parse_primary(&mut self, instructions: &mut Vec<Instruction>) -> Result<usize, JitError> {
         let loc = self.loc();
         let token = self.expect()?;
-        match token {
+        let mut current_reg = match token {
             Token::LParen => {
                 let r = self.parse_expr(instructions)?;
                 if !matches!(self.expect()?, Token::RParen) {
@@ -250,16 +265,27 @@ impl<'source> Parser<'source> {
                 Ok(r)
             }
             Token::LBracket => self.parse_list_literal(instructions),
+            Token::LBrace => self.parse_object_literal(instructions),
             Token::Identifier(id) => {
                 // Check if it's a function call
                 if matches!(self.peek(), Some(Ok(Token::LParen))) {
                     self.next_token(); // consume (
+                    self.skip_newlines();
                     let mut args = Vec::new();
                     if !matches!(self.peek(), Some(Ok(Token::RParen))) {
                         loop {
+                            self.skip_newlines();
                             args.push(self.parse_expr(instructions)?);
+                            self.skip_newlines();
                             match self.expect()? {
-                                Token::Comma => continue,
+                                Token::Comma => {
+                                    self.skip_newlines();
+                                    if matches!(self.peek(), Some(Ok(Token::RParen))) {
+                                        let _ = self.next_token(); // consume )
+                                        break;
+                                    }
+                                    continue;
+                                }
                                 Token::RParen => break,
                                 _ => {
                                     return Err(JitError::Parsing(
@@ -304,20 +330,18 @@ impl<'source> Parser<'source> {
                             loc: self.loc(),
                         });
                     }
-                    return Ok(dst);
-                }
-
-                let r = if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(id) {
+                    Ok(dst)
+                } else if let Some(&VarInfo { idx, is_global, .. }) = self.var_map.get(id) {
                     if is_global {
                         let r = self.alloc_reg();
                         instructions.push(Instruction::LoadGlobal {
                             dst: r,
                             global: idx,
                         });
-                        r
+                        Ok(r)
                     } else {
                         self.track_capture(idx);
-                        idx
+                        Ok(idx)
                     }
                 } else if self.all_function_names.contains(id) {
                     let val = if let Some(sso) = Value::sso(id) {
@@ -328,20 +352,31 @@ impl<'source> Parser<'source> {
                     };
                     let r = self.alloc_reg();
                     instructions.push(Instruction::LoadLiteral { dst: r, val });
-                    r
+                    Ok(r)
                 } else {
-                    return Err(JitError::UnknownVariable(
+                    Err(JitError::UnknownVariable(
                         id.into(),
                         loc.line as usize,
                         loc.col as usize,
-                    ));
-                };
+                    ))
+                }
+            }
+            _ => Err(JitError::Parsing(
+                "Expected expression".into(),
+                loc.line as usize,
+                loc.col as usize,
+            )),
+        }?;
 
-                // Handle potential indexing
-                let mut current_reg = r;
-                while matches!(self.peek(), Some(Ok(Token::LBracket))) {
+        // Handle suffixes:indexing [expr] and property access .id
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Some(Ok(Token::LBracket)) => {
                     self.next_token();
+                    self.skip_newlines();
                     let index_reg = self.parse_expr(instructions)?;
+                    self.skip_newlines();
                     if !matches!(self.next_token(), Some(Ok(Token::RBracket))) {
                         return Err(JitError::Parsing("Expected ']'".into(), self.line, 0));
                     }
@@ -354,14 +389,33 @@ impl<'source> Parser<'source> {
                     });
                     current_reg = dst;
                 }
-                Ok(current_reg)
+                Some(Ok(Token::Dot)) => {
+                    self.next_token();
+                    self.skip_newlines();
+                    let name = match self.next_token() {
+                        Some(Ok(Token::Identifier(id))) => id,
+                        _ => {
+                            return Err(JitError::Parsing(
+                                "Expected property name after '.'".into(),
+                                self.line,
+                                0,
+                            ));
+                        }
+                    };
+                    let name_id = self.intern(name);
+                    let dst = self.alloc_reg();
+                    instructions.push(Instruction::ObjectGet {
+                        dst,
+                        obj: current_reg,
+                        name_id,
+                        loc: self.loc(),
+                    });
+                    current_reg = dst;
+                }
+                _ => break,
             }
-            _ => Err(JitError::Parsing(
-                "Expected expression".into(),
-                loc.line as usize,
-                loc.col as usize,
-            )),
         }
+        Ok(current_reg)
     }
 
     fn parse_list_literal(
@@ -369,11 +423,19 @@ impl<'source> Parser<'source> {
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
         let mut elements = Vec::new();
+        self.skip_newlines();
         if !matches!(self.peek(), Some(Ok(Token::RBracket))) {
             loop {
+                self.skip_newlines();
                 elements.push(self.parse_expr(instructions)?);
+                self.skip_newlines();
                 match self.next_token() {
-                    Some(Ok(Token::Comma)) => continue,
+                    Some(Ok(Token::Comma)) => {
+                        self.skip_newlines();
+                        if matches!(self.peek(), Some(Ok(Token::RBracket))) {
+                            break;
+                        }
+                    }
                     Some(Ok(Token::RBracket)) => break,
                     _ => {
                         return Err(JitError::Parsing(
@@ -403,6 +465,82 @@ impl<'source> Parser<'source> {
             instructions.push(Instruction::ListSet {
                 list: dst,
                 index_reg,
+                src,
+                loc: self.loc(),
+            });
+        }
+
+        Ok(dst)
+    }
+
+    fn parse_object_literal(
+        &mut self,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<usize, JitError> {
+        let mut fields = Vec::new();
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(Ok(Token::RBrace))) {
+            loop {
+                self.skip_newlines();
+                let name = match self.next_token() {
+                    Some(Ok(Token::Identifier(id))) => id,
+                    _ => {
+                        return Err(JitError::Parsing(
+                            "Expected field name".into(),
+                            self.line,
+                            0,
+                        ));
+                    }
+                };
+                self.skip_newlines();
+                if !matches!(self.next_token(), Some(Ok(Token::Colon))) {
+                    return Err(JitError::Parsing(
+                        "Expected ':' after field name".into(),
+                        self.line,
+                        0,
+                    ));
+                }
+                self.skip_newlines();
+                let val_reg = self.parse_expr(instructions)?;
+                fields.push((name, val_reg));
+
+                self.skip_newlines();
+                match self.peek() {
+                    Some(Ok(Token::Comma)) => {
+                        self.next_token();
+                        self.skip_newlines();
+                        if matches!(self.peek(), Some(Ok(Token::RBrace))) {
+                            break;
+                        }
+                    }
+                    Some(Ok(Token::RBrace)) => break,
+                    _ => {
+                        return Err(JitError::Parsing(
+                            "Expected ',' or '}'".into(),
+                            self.line,
+                            0,
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.skip_newlines();
+        if !matches!(self.next_token(), Some(Ok(Token::RBrace))) {
+            return Err(JitError::Parsing("Expected '}'".into(), self.line, 0));
+        }
+
+        let dst = self.alloc_reg();
+        instructions.push(Instruction::NewObject {
+            dst,
+            capacity: fields.len(),
+        });
+
+        for (name, src) in fields {
+            let name_id = self.intern(name);
+            instructions.push(Instruction::ObjectSet {
+                obj: dst,
+                name_id,
                 src,
                 loc: self.loc(),
             });
@@ -466,11 +604,20 @@ impl<'source> Parser<'source> {
         if matches!(self.peek(), Some(Ok(Token::LParen))) {
             // Function style: name(arg1, arg2)
             self.next_token();
+            self.skip_newlines();
             if !matches!(self.peek(), Some(Ok(Token::RParen))) {
                 loop {
+                    self.skip_newlines();
                     args.push(self.parse_expr(instructions)?);
+                    self.skip_newlines();
                     match self.next_token() {
-                        Some(Ok(Token::Comma)) => continue,
+                        Some(Ok(Token::Comma)) => {
+                            self.skip_newlines();
+                            if matches!(self.peek(), Some(Ok(Token::RParen))) {
+                                break;
+                            }
+                            continue;
+                        }
                         Some(Ok(Token::RParen)) => break,
                         _ => {
                             return Err(JitError::Parsing(
@@ -547,7 +694,7 @@ impl<'source> Parser<'source> {
             })?
             .clone();
 
-        let mut current_list_reg = if info.is_global {
+        let base_reg = if info.is_global {
             let r = self.alloc_reg();
             instructions.push(Instruction::LoadGlobal {
                 dst: r,
@@ -559,21 +706,47 @@ impl<'source> Parser<'source> {
             info.idx
         };
 
-        let mut indices = Vec::new();
-        while matches!(self.peek(), Some(Ok(Token::LBracket))) {
-            self.next_token();
-            indices.push(self.parse_expr(instructions)?);
-            if !matches!(self.next_token(), Some(Ok(Token::RBracket))) {
-                return Err(JitError::Parsing("Expected ']'".into(), self.line, 0));
+        let mut accessors = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Some(Ok(Token::LBracket)) => {
+                    self.next_token();
+                    self.skip_newlines();
+                    let index_reg = self.parse_expr(instructions)?;
+                    self.skip_newlines();
+                    if !matches!(self.next_token(), Some(Ok(Token::RBracket))) {
+                        return Err(JitError::Parsing("Expected ']'".into(), self.line, 0));
+                    }
+                    accessors.push(Accessor::Index(index_reg));
+                }
+                Some(Ok(Token::Dot)) => {
+                    self.next_token();
+                    self.skip_newlines();
+                    let field = match self.next_token() {
+                        Some(Ok(Token::Identifier(id))) => id,
+                        _ => {
+                            return Err(JitError::Parsing(
+                                "Expected field name after '.'".into(),
+                                self.line,
+                                0,
+                            ));
+                        }
+                    };
+                    let name_id = self.intern(field);
+                    accessors.push(Accessor::Field(name_id));
+                }
+                _ => break,
             }
         }
 
+        self.skip_newlines();
         if !matches!(self.next_token(), Some(Ok(Token::Colon))) {
             return Err(JitError::Parsing("Expected ':'".into(), self.line, 0));
         }
 
         // Optimization: detect x: x + 1 or x: 1 + x
-        if indices.is_empty() {
+        if accessors.is_empty() {
             let mut lex = self.lexer.clone();
             let t1 = lex.next();
             let t2 = lex.next();
@@ -595,9 +768,6 @@ impl<'source> Parser<'source> {
             };
 
             if is_inc {
-                // Ensure it's not part of a larger expression like x: x + 1 * 2
-                // We check if the next token has higher or equal precedence than Plus,
-                // but since we only care if the expression ENDS there:
                 let is_isolated = match t4 {
                     Some(Ok(Token::Newline))
                     | Some(Ok(Token::RBrace))
@@ -608,7 +778,6 @@ impl<'source> Parser<'source> {
                 };
 
                 if is_isolated {
-                    // Consume tokens
                     let _ = self.next_token(); // t1
                     let _ = self.next_token(); // t2
                     let _ = self.next_token(); // t3
@@ -625,7 +794,7 @@ impl<'source> Parser<'source> {
 
         let src_reg = self.parse_expr(instructions)?;
 
-        if indices.is_empty() {
+        if accessors.is_empty() {
             if !info.is_mut {
                 return Err(JitError::RedefinitionOfImmutableVariable(
                     name.into(),
@@ -646,22 +815,47 @@ impl<'source> Parser<'source> {
                 });
             }
         } else {
-            for i in 0..indices.len() - 1 {
-                let next_list_reg = self.alloc_reg();
-                instructions.push(Instruction::ListGet {
-                    dst: next_list_reg,
-                    list: current_list_reg,
-                    index_reg: indices[i],
-                    loc: self.loc(),
-                });
-                current_list_reg = next_list_reg;
+            let mut current_reg = base_reg;
+            for accessor in accessors.iter().take(accessors.len() - 1) {
+                let next_reg = self.alloc_reg();
+                match accessor {
+                    Accessor::Index(index_reg) => {
+                        instructions.push(Instruction::ListGet {
+                            dst: next_reg,
+                            list: current_reg,
+                            index_reg: *index_reg,
+                            loc: self.loc(),
+                        });
+                    }
+                    Accessor::Field(name_id) => {
+                        instructions.push(Instruction::ObjectGet {
+                            dst: next_reg,
+                            obj: current_reg,
+                            name_id: *name_id,
+                            loc: self.loc(),
+                        });
+                    }
+                }
+                current_reg = next_reg;
             }
-            instructions.push(Instruction::ListSet {
-                list: current_list_reg,
-                index_reg: *indices.last().unwrap(),
-                src: src_reg,
-                loc: self.loc(),
-            });
+            match *accessors.last().unwrap() {
+                Accessor::Index(index_reg) => {
+                    instructions.push(Instruction::ListSet {
+                        list: current_reg,
+                        index_reg,
+                        src: src_reg,
+                        loc: self.loc(),
+                    });
+                }
+                Accessor::Field(name_id) => {
+                    instructions.push(Instruction::ObjectSet {
+                        obj: current_reg,
+                        name_id,
+                        src: src_reg,
+                        loc: self.loc(),
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -723,14 +917,7 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_block(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
-        loop {
-            match self.peek() {
-                Some(Ok(Token::Newline)) | Some(Ok(Token::LineComment)) => {
-                    self.next_token();
-                }
-                _ => break,
-            }
-        }
+        self.skip_newlines();
         if !matches!(self.next_token(), Some(Ok(Token::LBrace))) {
             return Err(JitError::Parsing("Expected '{'".into(), self.line, 0));
         }

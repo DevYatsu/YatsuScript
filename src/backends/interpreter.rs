@@ -157,6 +157,70 @@ pub async fn execute_bytecode(
 
     let mut pc = 0;
     let mut instr_count: u32 = 0;
+
+    macro_rules! binary_op {
+        ($dst:expr, $lhs:expr, $rhs:expr, $op:tt, $loc:expr) => {{
+            let l_bits = unsafe { registers.get_unchecked(*$lhs).load(Ordering::Relaxed) };
+            let r_bits = unsafe { registers.get_unchecked(*$rhs).load(Ordering::Relaxed) };
+
+            if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
+                let res = f64::from_bits(l_bits) $op f64::from_bits(r_bits);
+                unsafe {
+                    registers
+                        .get_unchecked(*$dst)
+                        .store(Value::number(res).to_bits(), Ordering::Relaxed);
+                }
+            } else {
+                let l = Value::from_bits(l_bits);
+                let r = Value::from_bits(r_bits);
+                if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
+                    unsafe {
+                        registers
+                            .get_unchecked(*$dst)
+                            .store(Value::number(lv $op rv).to_bits(), Ordering::Relaxed);
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        format!("Math error: expected numbers for '{}'", stringify!($op)),
+                        $loc.line as usize,
+                        $loc.col as usize,
+                    ));
+                }
+            }
+        }};
+    }
+
+    macro_rules! compare_op {
+        ($dst:expr, $lhs:expr, $rhs:expr, $op:tt, $loc:expr) => {{
+            let l_bits = unsafe { registers.get_unchecked(*$lhs).load(Ordering::Relaxed) };
+            let r_bits = unsafe { registers.get_unchecked(*$rhs).load(Ordering::Relaxed) };
+            let res = if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
+                Some(f64::from_bits(l_bits) $op f64::from_bits(r_bits))
+            } else {
+                let l = Value::from_bits(l_bits);
+                let r = Value::from_bits(r_bits);
+                if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
+                    Some(lv $op rv)
+                } else {
+                    None
+                }
+            };
+            if let Some(res) = res {
+                unsafe {
+                    registers
+                        .get_unchecked(*$dst)
+                        .store(Value::bool(res).to_bits(), Ordering::Relaxed);
+                }
+            } else {
+                return Err(JitError::Runtime(
+                    format!("Compare error: expected numbers for '{}'", stringify!($op)),
+                    $loc.line as usize,
+                    $loc.col as usize,
+                ));
+            }
+        }};
+    }
+
     while pc < instructions.len() {
         let instr = unsafe { instructions.get_unchecked(pc) };
         instr_count = instr_count.wrapping_add(1);
@@ -420,93 +484,15 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Sub { dst, lhs, rhs, loc } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-
-                if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                    let res = f64::from_bits(l_bits) - f64::from_bits(r_bits);
-                    unsafe {
-                        registers
-                            .get_unchecked(*dst)
-                            .store(Value::number(res).to_bits(), Ordering::Relaxed);
-                    }
-                } else {
-                    let l = Value::from_bits(l_bits);
-                    let r = Value::from_bits(r_bits);
-                    if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                        unsafe {
-                            registers
-                                .get_unchecked(*dst)
-                                .store(Value::number(lv - rv).to_bits(), Ordering::Relaxed);
-                        }
-                    } else {
-                        return Err(JitError::Runtime(
-                            "Math error: expected numbers".into(),
-                            loc.line as usize,
-                            loc.col as usize,
-                        ));
-                    }
-                }
+                binary_op!(dst, lhs, rhs, -, loc);
                 pc += 1;
             }
             Instruction::Mul { dst, lhs, rhs, loc } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-
-                if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                    let res = f64::from_bits(l_bits) * f64::from_bits(r_bits);
-                    unsafe {
-                        registers
-                            .get_unchecked(*dst)
-                            .store(Value::number(res).to_bits(), Ordering::Relaxed);
-                    }
-                } else {
-                    let l = Value::from_bits(l_bits);
-                    let r = Value::from_bits(r_bits);
-                    if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                        unsafe {
-                            registers
-                                .get_unchecked(*dst)
-                                .store(Value::number(lv * rv).to_bits(), Ordering::Relaxed);
-                        }
-                    } else {
-                        return Err(JitError::Runtime(
-                            "Math error: expected numbers".into(),
-                            loc.line as usize,
-                            loc.col as usize,
-                        ));
-                    }
-                }
+                binary_op!(dst, lhs, rhs, *, loc);
                 pc += 1;
             }
             Instruction::Div { dst, lhs, rhs, loc } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-
-                if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                    let res = f64::from_bits(l_bits) / f64::from_bits(r_bits);
-                    unsafe {
-                        registers
-                            .get_unchecked(*dst)
-                            .store(Value::number(res).to_bits(), Ordering::Relaxed);
-                    }
-                } else {
-                    let l = Value::from_bits(l_bits);
-                    let r = Value::from_bits(r_bits);
-                    if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                        unsafe {
-                            registers
-                                .get_unchecked(*dst)
-                                .store(Value::number(lv / rv).to_bits(), Ordering::Relaxed);
-                        }
-                    } else {
-                        return Err(JitError::Runtime(
-                            "Math error: expected numbers".into(),
-                            loc.line as usize,
-                            loc.col as usize,
-                        ));
-                    }
-                }
+                binary_op!(dst, lhs, rhs, /, loc);
                 pc += 1;
             }
             Instruction::Increment(reg) => {
@@ -568,119 +554,19 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Lt { dst, lhs, rhs, loc } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-                let res = if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                    Some(f64::from_bits(l_bits) < f64::from_bits(r_bits))
-                } else {
-                    let l = Value::from_bits(l_bits);
-                    let r = Value::from_bits(r_bits);
-                    if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                        Some(lv < rv)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(eq) = res {
-                    unsafe {
-                        registers
-                            .get_unchecked(*dst)
-                            .store(Value::bool(eq).to_bits(), Ordering::Relaxed);
-                    }
-                } else {
-                    return Err(JitError::Runtime(
-                        "Compare error: expected numbers".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                }
+                compare_op!(dst, lhs, rhs, <, loc);
                 pc += 1;
             }
             Instruction::Le { dst, lhs, rhs, loc } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-                let res = if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                    Some(f64::from_bits(l_bits) <= f64::from_bits(r_bits))
-                } else {
-                    let l = Value::from_bits(l_bits);
-                    let r = Value::from_bits(r_bits);
-                    if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                        Some(lv <= rv)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(eq) = res {
-                    unsafe {
-                        registers
-                            .get_unchecked(*dst)
-                            .store(Value::bool(eq).to_bits(), Ordering::Relaxed);
-                    }
-                } else {
-                    return Err(JitError::Runtime(
-                        "Compare error: expected numbers".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                }
+                compare_op!(dst, lhs, rhs, <=, loc);
                 pc += 1;
             }
             Instruction::Gt { dst, lhs, rhs, loc } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-                let res = if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                    Some(f64::from_bits(l_bits) > f64::from_bits(r_bits))
-                } else {
-                    let l = Value::from_bits(l_bits);
-                    let r = Value::from_bits(r_bits);
-                    if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                        Some(lv > rv)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(eq) = res {
-                    unsafe {
-                        registers
-                            .get_unchecked(*dst)
-                            .store(Value::bool(eq).to_bits(), Ordering::Relaxed);
-                    }
-                } else {
-                    return Err(JitError::Runtime(
-                        "Compare error: expected numbers".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                }
+                compare_op!(dst, lhs, rhs, >, loc);
                 pc += 1;
             }
             Instruction::Ge { dst, lhs, rhs, loc } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-                let res = if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                    Some(f64::from_bits(l_bits) >= f64::from_bits(r_bits))
-                } else {
-                    let l = Value::from_bits(l_bits);
-                    let r = Value::from_bits(r_bits);
-                    if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                        Some(lv >= rv)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(eq) = res {
-                    unsafe {
-                        registers
-                            .get_unchecked(*dst)
-                            .store(Value::bool(eq).to_bits(), Ordering::Relaxed);
-                    }
-                } else {
-                    return Err(JitError::Runtime(
-                        "Compare error: expected numbers".into(),
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                }
+                compare_op!(dst, lhs, rhs, >=, loc);
                 pc += 1;
             }
             Instruction::NewList { dst, len } => {
@@ -763,9 +649,10 @@ pub async fn execute_bytecode(
                 let list_val = Value::from_bits(unsafe {
                     registers.get_unchecked(*list).load(Ordering::Relaxed)
                 });
-                let index_bits = unsafe { registers.get_unchecked(*index_reg).load(Ordering::Relaxed) };
+                let index_bits =
+                    unsafe { registers.get_unchecked(*index_reg).load(Ordering::Relaxed) };
                 let src_bits = unsafe { registers.get_unchecked(*src).load(Ordering::Relaxed) };
-                
+
                 let index = if (index_bits & QNAN) != QNAN {
                     f64::from_bits(index_bits) as usize
                 } else {
@@ -832,6 +719,129 @@ pub async fn execute_bytecode(
                 } else {
                     return Err(JitError::Runtime(
                         "Expected list for indexing".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::NewObject { dst, capacity } => {
+                let fields =
+                    rustc_hash::FxHashMap::with_capacity_and_hasher(*capacity, Default::default());
+                ctx.alloc(
+                    ManagedObject::Object(std::sync::RwLock::new(fields)),
+                    unsafe { registers.get_unchecked(*dst) },
+                );
+                pc += 1;
+            }
+            Instruction::ObjectGet {
+                dst,
+                obj,
+                name_id,
+                loc,
+            } => {
+                let obj_bits = unsafe { registers.get_unchecked(*obj).load(Ordering::Relaxed) };
+                let obj_val = Value::from_bits(obj_bits);
+                if let Some(oid) = obj_val.as_obj_id() {
+                    let heap = ctx.heap.objects.read().unwrap();
+                    if let Some(Some(obj_ref)) = heap.get(oid as usize) {
+                        if let ManagedObject::Object(fields) = &obj_ref.obj {
+                            let fields = fields.read().unwrap();
+                            if let Some(atomic_val) = fields.get(name_id) {
+                                let val_bits = atomic_val.load(Ordering::Relaxed);
+                                unsafe {
+                                    registers
+                                        .get_unchecked(*dst)
+                                        .store(val_bits, Ordering::Relaxed);
+                                }
+                            } else {
+                                unsafe {
+                                    registers.get_unchecked(*dst).store(0, Ordering::Relaxed); // return 0/NaN for missing fields
+                                }
+                            }
+                        } else {
+                            return Err(JitError::Runtime(
+                                "Expected object for property access".into(),
+                                loc.line as usize,
+                                loc.col as usize,
+                            ));
+                        }
+                    } else {
+                        return Err(JitError::Runtime(
+                            "Expected object for property access".into(),
+                            loc.line as usize,
+                            loc.col as usize,
+                        ));
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Expected object for property access".into(),
+                        loc.line as usize,
+                        loc.col as usize,
+                    ));
+                }
+                pc += 1;
+            }
+            Instruction::ObjectSet {
+                obj,
+                name_id,
+                src,
+                loc,
+            } => {
+                let obj_bits = unsafe { registers.get_unchecked(*obj).load(Ordering::Relaxed) };
+                let src_bits = unsafe { registers.get_unchecked(*src).load(Ordering::Relaxed) };
+                let obj_val = Value::from_bits(obj_bits);
+
+                if let Some(oid) = obj_val.as_obj_id() {
+                    let heap = ctx.heap.objects.read().unwrap();
+                    if let Some(Some(obj_ref)) = heap.get(oid as usize) {
+                        if let ManagedObject::Object(fields) = &obj_ref.obj {
+                            {
+                                let fields_read = fields.read().unwrap();
+                                if let Some(slot) = fields_read.get(name_id) {
+                                    slot.store(src_bits, Ordering::Relaxed);
+                                } else {
+                                    drop(fields_read);
+                                    let mut fields_write = fields.write().unwrap();
+                                    fields_write.insert(*name_id, AtomicU64::new(src_bits));
+                                }
+                            }
+
+                            // Write Barrier
+                            if obj_ref.generation == Generation::Tenured {
+                                if (src_bits & QNAN) == QNAN {
+                                    let src_val = Value::from_bits(src_bits);
+                                    if let Some(src_oid) = src_val.as_obj_id() {
+                                        if let Some(Some(src_obj)) = heap.get(src_oid as usize)
+                                            && src_obj.generation == Generation::Nursery
+                                        {
+                                            ctx.heap
+                                                .metadata
+                                                .lock()
+                                                .unwrap()
+                                                .remembered_set
+                                                .insert(oid);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            return Err(JitError::Runtime(
+                                "Expected object for property assignment".into(),
+                                loc.line as usize,
+                                loc.col as usize,
+                            ));
+                        }
+                    } else {
+                        return Err(JitError::Runtime(
+                            "Expected object for property assignment".into(),
+                            loc.line as usize,
+                            loc.col as usize,
+                        ));
+                    }
+                } else {
+                    return Err(JitError::Runtime(
+                        "Expected object for property assignment".into(),
                         loc.line as usize,
                         loc.col as usize,
                     ));
@@ -913,6 +923,9 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                         match &obj.obj {
                             ManagedObject::String(s) => return Ok(Value::number(s.len() as f64)),
                             ManagedObject::List(l) => return Ok(Value::number(l.len() as f64)),
+                            ManagedObject::Object(o) => {
+                                return Ok(Value::number(o.read().unwrap().len() as f64));
+                            }
                         }
                     }
                 } else if let Some(s) = val.as_string(&ctx) {
@@ -1180,6 +1193,26 @@ fn stringify_value(ctx: &Context, val: Value) -> String {
                     res.push(']');
                     res
                 }
+                ManagedObject::Object(fields) => {
+                    let mut res = String::from("{");
+                    let fields = fields.read().unwrap();
+                    for (i, (&name_id, atomic_val)) in fields.iter().enumerate() {
+                        if i > 0 {
+                            res.push_str(", ");
+                        }
+                        let name = ctx
+                            .string_pool
+                            .get(name_id as usize)
+                            .map(|s| s.as_ref())
+                            .unwrap_or("?");
+                        res.push_str(name);
+                        res.push_str(": ");
+                        let v = Value::from_bits(atomic_val.load(Ordering::Relaxed));
+                        res.push_str(&stringify_value_nested(ctx, v));
+                    }
+                    res.push('}');
+                    res
+                }
             }
         } else {
             "null".to_string()
@@ -1198,6 +1231,7 @@ fn stringify_value_nested(ctx: &Context, val: Value) -> String {
             match obj {
                 ManagedObject::String(s) => format!("\"{}\"", s),
                 ManagedObject::List(_) => "[...]".to_string(),
+                ManagedObject::Object(_) => "{...}".to_string(),
             }
         } else {
             "null".to_string()

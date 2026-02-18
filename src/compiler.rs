@@ -234,6 +234,22 @@ pub enum Instruction {
         src: usize,
         loc: Loc,
     },
+    /// Create a new object on the heap.
+    NewObject { dst: usize, capacity: usize },
+    /// Retrieve a property from an object by name ID.
+    ObjectGet {
+        dst: usize,
+        obj: usize,
+        name_id: u32,
+        loc: Loc,
+    },
+    /// Set a property in an object by name ID.
+    ObjectSet {
+        obj: usize,
+        name_id: u32,
+        src: usize,
+        loc: Loc,
+    },
     /// Call a function (user or native) by its name ID in the string pool.
     Call {
         name_id: u32,

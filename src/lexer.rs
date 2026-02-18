@@ -92,6 +92,9 @@ pub enum Token<'source> {
     /// ',' separator.
     #[token(",")]
     Comma,
+    /// '.' operator for object property access.
+    #[token(".")]
+    Dot,
     /// '+' operator.
     #[token("+")]
     Plus,

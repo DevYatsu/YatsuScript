@@ -1,0 +1,16 @@
+le x: {
+    a: {b: 3, c: 4},
+    b: 2
+}
+
+print(x.a.c)
+
+le y: {
+    a: {
+        b: 3,
+        c: 4
+    },
+    b: 2
+}
+
+print(y.a.c)
