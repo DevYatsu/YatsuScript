@@ -63,10 +63,10 @@ impl<'source> Parser<'source> {
         let mut all_function_names = std::collections::HashSet::new();
         let mut temp_lex = lexer.clone();
         while let Some(res) = temp_lex.next() {
-            if let Ok(Token::Fn) = res {
-                if let Some(Ok(Token::Identifier(id))) = temp_lex.next() {
-                    all_function_names.insert(id);
-                }
+            if let Ok(Token::Fn) = res
+                && let Some(Ok(Token::Identifier(id))) = temp_lex.next()
+            {
+                all_function_names.insert(id);
             }
         }
         for name in ["print", "len", "time", "sleep", "fetch", "serve", "str"] {
@@ -238,10 +238,11 @@ impl<'source> Parser<'source> {
                 Ok(r)
             }
             Token::String(s) => {
-                let val = if let Some(sso) = Value::sso(s) {
+                let unescaped = unescape_string(s);
+                let val = if let Some(sso) = Value::sso(&unescaped) {
                     sso
                 } else {
-                    let id = self.intern(s);
+                    let id = self.intern(&unescaped);
                     Value::object(id)
                 };
                 let r = self.alloc_reg();
@@ -993,4 +994,52 @@ impl<'source> Parser<'source> {
 
         Ok(())
     }
+}
+
+fn unescape_string(s: &str) -> String {
+    let mut res = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => res.push('\n'),
+                Some('r') => res.push('\r'),
+                Some('t') => res.push('\t'),
+                Some('b') => res.push('\x08'),
+                Some('f') => res.push('\x0c'),
+                Some('\\') => res.push('\\'),
+                Some('"') => res.push('"'),
+                Some('/') => res.push('/'),
+                Some('u') => {
+                    let mut hex = String::with_capacity(4);
+                    for _ in 0..4 {
+                        if let Some(h) = chars.next() {
+                            hex.push(h);
+                        }
+                    }
+                    if let Ok(n) = u32::from_str_radix(&hex, 16) {
+                        if let Some(uc) = std::char::from_u32(n) {
+                            res.push(uc);
+                        } else {
+                            res.push('\\');
+                            res.push('u');
+                            res.push_str(&hex);
+                        }
+                    } else {
+                        res.push('\\');
+                        res.push('u');
+                        res.push_str(&hex);
+                    }
+                }
+                Some(other) => {
+                    res.push('\\');
+                    res.push(other);
+                }
+                None => res.push('\\'),
+            }
+        } else {
+            res.push(c);
+        }
+    }
+    res
 }

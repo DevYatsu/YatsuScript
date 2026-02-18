@@ -107,10 +107,10 @@ impl Value {
         // other string objects
         if let Some(oid) = self.as_obj_id() {
             let heap = ctx.heap.read().unwrap();
-            if let Some(Some(obj)) = heap.get(oid as usize) {
-                if let ManagedObject::String(s) = &obj.obj {
-                    return Some(s.to_string());
-                }
+            if let Some(Some(obj)) = heap.get(oid as usize)
+                && let ManagedObject::String(s) = &obj.obj
+            {
+                return Some(s.to_string());
             }
         }
         None

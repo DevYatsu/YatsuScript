@@ -12,3 +12,4 @@ logger("Hello", handle)
 
 print("\nTesting with native function:")
 logger("Native", str)
+

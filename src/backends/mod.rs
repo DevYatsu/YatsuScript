@@ -117,14 +117,14 @@ impl Context {
             } else {
                 // Heap string outside pool — scan pool for a match
                 let heap = self.heap.read().unwrap();
-                if let Some(Some(obj)) = heap.get(oid as usize) {
-                    if let ManagedObject::String(s) = &obj.obj {
-                        return self
-                            .string_pool
-                            .iter()
-                            .position(|p| p == s)
-                            .map(|i| i as u32);
-                    }
+                if let Some(Some(obj)) = heap.get(oid as usize)
+                    && let ManagedObject::String(s) = &obj.obj
+                {
+                    return self
+                        .string_pool
+                        .iter()
+                        .position(|p| p == s)
+                        .map(|i| i as u32);
                 }
                 None
             }
@@ -136,15 +136,14 @@ impl Context {
     pub fn alloc(&self, obj: ManagedObject, dst: &AtomicU64) -> u32 {
         {
             let count = self.alloc_since_gc.fetch_add(1, Ordering::Relaxed);
-            if count >= 10000 {
-                if self
+            if count >= 10000
+                && self
                     .alloc_since_gc
                     .compare_exchange(count + 1, 0, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
-                {
-                    println!("DEBUG: Triggering GC...");
-                    self.collect_garbage();
-                }
+            {
+                println!("DEBUG: Triggering GC...");
+                self.collect_garbage();
             }
         }
 
@@ -180,7 +179,7 @@ impl Context {
     pub fn collect_garbage(&self) {
         let gc_id = self.gc_count.fetch_add(1, Ordering::Relaxed) + 1;
 
-        if gc_id % 5 == 0 {
+        if gc_id.is_multiple_of(5) {
             self.major_gc(gc_id);
         } else {
             self.minor_gc(gc_id);
@@ -194,11 +193,11 @@ impl Context {
         self.trace_roots(&mut worklist);
 
         while let Some(id) = worklist.pop() {
-            if let Some(Some(obj)) = heap.get_mut(id as usize) {
-                if obj.last_gc_id != gc_id {
-                    obj.last_gc_id = gc_id;
-                    self.trace_object_ids(obj, &mut worklist);
-                }
+            if let Some(Some(obj)) = heap.get_mut(id as usize)
+                && obj.last_gc_id != gc_id
+            {
+                obj.last_gc_id = gc_id;
+                self.trace_object_ids(obj, &mut worklist);
             }
         }
 
@@ -234,11 +233,11 @@ impl Context {
         }
 
         while let Some(id) = worklist.pop() {
-            if let Some(Some(obj)) = heap.get_mut(id as usize) {
-                if obj.last_gc_id != gc_id {
-                    obj.last_gc_id = gc_id;
-                    self.trace_object_ids(obj, &mut worklist);
-                }
+            if let Some(Some(obj)) = heap.get_mut(id as usize)
+                && obj.last_gc_id != gc_id
+            {
+                obj.last_gc_id = gc_id;
+                self.trace_object_ids(obj, &mut worklist);
             }
         }
 
@@ -262,19 +261,19 @@ impl Context {
         let mut new_remembered = rustc_hash::FxHashSet::default();
 
         for &id in remembered_set.iter() {
-            if let Some(Some(obj)) = heap.get(id as usize) {
-                if obj.generation == Generation::Tenured && self.check_points_to_nursery(obj, &heap)
-                {
-                    new_remembered.insert(id);
-                }
+            if let Some(Some(obj)) = heap.get(id as usize)
+                && obj.generation == Generation::Tenured
+                && self.check_points_to_nursery(obj, &heap)
+            {
+                new_remembered.insert(id);
             }
         }
 
         for id in promoted_ids {
-            if let Some(Some(obj)) = heap.get(id as usize) {
-                if self.check_points_to_nursery(obj, &heap) {
-                    new_remembered.insert(id);
-                }
+            if let Some(Some(obj)) = heap.get(id as usize)
+                && self.check_points_to_nursery(obj, &heap)
+            {
+                new_remembered.insert(id);
             }
         }
 
@@ -344,10 +343,10 @@ impl Context {
         }
         if let Some(oid) = val.as_obj_id() {
             let heap = self.heap.read().unwrap();
-            if let Some(Some(obj)) = heap.get(oid as usize) {
-                if let ManagedObject::String(s) = &obj.obj {
-                    return Some(s.to_string());
-                }
+            if let Some(Some(obj)) = heap.get(oid as usize)
+                && let ManagedObject::String(s) = &obj.obj
+            {
+                return Some(s.to_string());
             }
         }
         None
@@ -380,14 +379,12 @@ impl Context {
         // Both could be heap strings
         if let (Some(id1), Some(id2)) = (v1.as_obj_id(), v2.as_obj_id()) {
             let heap = self.heap.read().unwrap();
-            if id1 < heap.len() as u32 && id2 < heap.len() as u32 {
-                if let (Some(o1), Some(o2)) = (&heap[id1 as usize], &heap[id2 as usize]) {
-                    if let (ManagedObject::String(s1), ManagedObject::String(s2)) =
-                        (&o1.obj, &o2.obj)
-                    {
-                        return s1 == s2;
-                    }
-                }
+            if id1 < heap.len() as u32
+                && id2 < heap.len() as u32
+                && let (Some(o1), Some(o2)) = (&heap[id1 as usize], &heap[id2 as usize])
+                && let (ManagedObject::String(s1), ManagedObject::String(s2)) = (&o1.obj, &o2.obj)
+            {
+                return s1 == s2;
             }
         }
 

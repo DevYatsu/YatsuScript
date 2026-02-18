@@ -18,12 +18,9 @@ async fn main() -> Result<(), JitError> {
 
     // Check if help is requested
     if args.contains(["-h", "--help"]) {
-        println!("Usage: small_jit [FILE] [-b BACKEND]");
-        println!("Backends: interpreter (default), cranelift");
+        println!("Usage: small_jit [FILE]");
         return Ok(());
     }
-
-    let _backend: Option<String> = args.opt_value_from_str(["-b", "--backend"]).ok().flatten();
 
     let file_path: String = args
         .free_from_str()

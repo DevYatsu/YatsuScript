@@ -59,8 +59,7 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
 
     // native_fns: indexed by string pool ID.
     let mut native_fns: Vec<Option<NativeFn>> = vec![None; string_pool_vec.len()];
-    let mut native_by_name_id: rustc_hash::FxHashMap<u32, usize> =
-        rustc_hash::FxHashMap::default();
+    let mut native_by_name_id: rustc_hash::FxHashMap<u32, usize> = rustc_hash::FxHashMap::default();
     for (name, func) in &registry {
         if let Some(&id) = string_pool_index.get(name.as_str()) {
             native_fns[id as usize] = Some(func.clone());
@@ -195,7 +194,7 @@ pub async fn execute_bytecode(
                 let native_fn = ctx
                     .native_fns
                     .get(*name_id as usize)
-                   .and_then(|f| f.clone());
+                    .and_then(|f| f.clone());
                 if let Some(native_fn) = native_fn {
                     let mut args = Vec::with_capacity(args_regs.len());
                     for &reg in args_regs.iter() {
@@ -404,10 +403,16 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Sub { dst, lhs, rhs, loc } => {
-                let l = Value::from_bits(registers[*lhs].load(Ordering::Relaxed));
-                let r = Value::from_bits(registers[*rhs].load(Ordering::Relaxed));
+                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
+                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
+                let l = Value::from_bits(l_bits);
+                let r = Value::from_bits(r_bits);
                 if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    registers[*dst].store(Value::number(lv - rv).to_bits(), Ordering::Relaxed);
+                    unsafe {
+                        registers
+                            .get_unchecked(*dst)
+                            .store(Value::number(lv - rv).to_bits(), Ordering::Relaxed);
+                    }
                 } else {
                     return Err(JitError::Runtime(
                         "Math error: expected numbers".into(),
@@ -418,10 +423,16 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Mul { dst, lhs, rhs, loc } => {
-                let l = Value::from_bits(registers[*lhs].load(Ordering::Relaxed));
-                let r = Value::from_bits(registers[*rhs].load(Ordering::Relaxed));
+                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
+                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
+                let l = Value::from_bits(l_bits);
+                let r = Value::from_bits(r_bits);
                 if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    registers[*dst].store(Value::number(lv * rv).to_bits(), Ordering::Relaxed);
+                    unsafe {
+                        registers
+                            .get_unchecked(*dst)
+                            .store(Value::number(lv * rv).to_bits(), Ordering::Relaxed);
+                    }
                 } else {
                     return Err(JitError::Runtime(
                         "Math error: expected numbers".into(),
@@ -432,10 +443,16 @@ pub async fn execute_bytecode(
                 pc += 1;
             }
             Instruction::Div { dst, lhs, rhs, loc } => {
-                let l = Value::from_bits(registers[*lhs].load(Ordering::Relaxed));
-                let r = Value::from_bits(registers[*rhs].load(Ordering::Relaxed));
+                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
+                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
+                let l = Value::from_bits(l_bits);
+                let r = Value::from_bits(r_bits);
                 if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    registers[*dst].store(Value::number(lv / rv).to_bits(), Ordering::Relaxed);
+                    unsafe {
+                        registers
+                            .get_unchecked(*dst)
+                            .store(Value::number(lv / rv).to_bits(), Ordering::Relaxed);
+                    }
                 } else {
                     return Err(JitError::Runtime(
                         "Math error: expected numbers".into(),
@@ -754,7 +771,7 @@ pub async fn execute_bytecode(
                     t_regs.push(AtomicU64::new(0));
                 }
                 for &reg in captures.iter() {
-                    let bits = registers[reg].load(Ordering::Relaxed);
+                    let bits = unsafe { registers.get_unchecked(reg).load(Ordering::Relaxed) };
                     t_regs[reg].store(bits, Ordering::Relaxed);
                 }
                 let thread_regs: Arc<[AtomicU64]> = Arc::from(t_regs);
