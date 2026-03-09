@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_lexer_symbols() {
-        let input = ": { } ( ) [ ] , . + - * / == != < <= > >=";
+        let input = ": { } ( ) [ ] , . + - * / == != < <= > >= !";
         let mut lexer = Token::lexer(input);
 
         assert_eq!(lexer.next(), Some(Ok(Token::Colon)));

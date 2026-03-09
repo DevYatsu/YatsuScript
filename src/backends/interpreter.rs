@@ -371,8 +371,8 @@ pub async fn execute_bytecode(
                 })?;
 
                 // For user functions, verify arity before building registers.
-                if let Callable::User(func) = callable {
-                    if args_regs.len() != func.params_count {
+                if let Callable::User(func) = callable
+                    && args_regs.len() != func.params_count {
                         return Err(JitError::runtime(
                             format!(
                                 "Function arity mismatch: expected {}, got {}",
@@ -383,7 +383,6 @@ pub async fn execute_bytecode(
                             loc.col as usize,
                         ));
                     }
-                }
 
                 let args: Vec<Value> = args_regs.iter().map(|&r| load(&registers, r)).collect();
                 dispatch_call!(callable, args, dst.map(|r| r), *loc);
@@ -402,8 +401,8 @@ pub async fn execute_bytecode(
                 // Handle BoundMethod (e.g., range.step(...) or list.pad(...))
                 if let Some(oid) = callee_val.as_obj_id() {
                     let heap = ctx.heap.objects.read();
-                    if let Some(Some(obj_ref)) = heap.get(oid as usize) {
-                        if let ManagedObject::BoundMethod { receiver, name_id } = &obj_ref.obj {
+                    if let Some(Some(obj_ref)) = heap.get(oid as usize)
+                        && let ManagedObject::BoundMethod { receiver, name_id } = &obj_ref.obj {
                             let method = pool_name(&ctx, *name_id).to_owned();
                             let receiver_val = *receiver;
                             drop(heap);
@@ -420,19 +419,18 @@ pub async fn execute_bytecode(
                                         .unwrap_or_else(|| Value::from_bits(0))
                                         .to_bits();
                                     let heap = ctx.heap.objects.read();
-                                    if let Some(Some(list_obj)) = heap.get(list_oid as usize) {
-                                        if let ManagedObject::List(elements) = &list_obj.obj {
+                                    if let Some(Some(list_obj)) = heap.get(list_oid as usize)
+                                        && let ManagedObject::List(elements) = &list_obj.obj {
                                             let mut w = elements.write();
                                             if w.len() < n {
                                                 w.resize_with(n, || AtomicU64::new(fill_bits));
                                             }
                                         }
-                                    }
                                 }
                                 pc += 1;
                                 continue;
-                            } else if method == "step" {
-                                if let Some(r_oid) = receiver_val.as_obj_id() {
+                            } else if method == "step"
+                                && let Some(r_oid) = receiver_val.as_obj_id() {
                                     // Extract start/end while holding the read-lock, then drop
                                     // it before calling ctx.alloc(), which needs the write-lock.
                                     let range_vals = {
@@ -473,7 +471,6 @@ pub async fn execute_bytecode(
                                         continue;
                                     }
                                 }
-                            }
                             // Unknown bound method — fall through to produce a clear error.
                             return Err(JitError::runtime(
                                 format!("Unknown method '{}'", method),
@@ -481,7 +478,6 @@ pub async fn execute_bytecode(
                                 loc.col as usize,
                             ));
                         }
-                    }
                 }
 
                 let name_id = ctx.value_as_pool_id(callee_val).ok_or_else(|| {
@@ -819,16 +815,14 @@ pub async fn execute_bytecode(
                 }
 
                 // Write barrier: track tenured → nursery references.
-                if obj.generation == Generation::Tenured && (src_bits & QNAN) == QNAN {
-                    if let Some(src_oid) = Value::from_bits(src_bits).as_obj_id() {
+                if obj.generation == Generation::Tenured && (src_bits & QNAN) == QNAN
+                    && let Some(src_oid) = Value::from_bits(src_bits).as_obj_id() {
                         let heap2 = ctx.heap.objects.read();
-                        if let Some(Some(src_obj)) = heap2.get(src_oid as usize) {
-                            if src_obj.generation == Generation::Nursery {
+                        if let Some(Some(src_obj)) = heap2.get(src_oid as usize)
+                            && src_obj.generation == Generation::Nursery {
                                 ctx.heap.metadata.lock().unwrap().remembered_set.insert(oid);
                             }
-                        }
                     }
-                }
             }
 
             // --- Objects ---
@@ -881,13 +875,13 @@ pub async fn execute_bytecode(
                                 }
                             }
                             ManagedObject::Range { start, end, .. } => {
-                                let val = match pool_name(&ctx, *name_id) {
+                                
+                                match pool_name(&ctx, *name_id) {
                                     "start" => GetResult::Val(Value::number(*start)),
                                     "end" => GetResult::Val(Value::number(*end)),
                                     "step" => GetResult::Method(obj_val, *name_id),
                                     _ => GetResult::Val(Value::from_bits(0)),
-                                };
-                                val
+                                }
                             }
                             _ => GetResult::Error("Expected object for property access"),
                         }
@@ -968,15 +962,12 @@ pub async fn execute_bytecode(
                 }
 
                 // Write barrier.
-                if obj_ref.generation == Generation::Tenured && (src_bits & QNAN) == QNAN {
-                    if let Some(src_oid) = Value::from_bits(src_bits).as_obj_id() {
-                        if let Some(Some(src_obj)) = heap.get(src_oid as usize) {
-                            if src_obj.generation == Generation::Nursery {
+                if obj_ref.generation == Generation::Tenured && (src_bits & QNAN) == QNAN
+                    && let Some(src_oid) = Value::from_bits(src_bits).as_obj_id()
+                        && let Some(Some(src_obj)) = heap.get(src_oid as usize)
+                            && src_obj.generation == Generation::Nursery {
                                 ctx.heap.metadata.lock().unwrap().remembered_set.insert(oid);
                             }
-                        }
-                    }
-                }
             }
 
             // --- Concurrency ---
@@ -1003,7 +994,8 @@ pub async fn execute_bytecode(
                     s_ctx.active_registers.lock().unwrap().push(t_roots.clone());
 
                     let res =
-                        execute_bytecode(&body.clone(), s_ctx, &mut js, thread_regs, None, t_roots).await;
+                        execute_bytecode(&body.clone(), s_ctx, &mut js, thread_regs, None, t_roots)
+                            .await;
                     drain_join_set(&mut js).await?;
                     res.map(|_| ())
                 });

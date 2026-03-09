@@ -300,7 +300,7 @@ mod tests {
     fn function_call_emits_call_instruction() {
         let instrs = instructions("fn greet() {}\ngreet()");
         assert!(
-            instrs.iter().any(|i| matches!(i, Instruction::Call { .. })),
+            instrs.iter().any(|i| matches!(i, Instruction::Call(_))),
             "expected Call instruction"
         );
     }
@@ -394,9 +394,7 @@ mod tests {
     fn spawn_emits_spawn_instruction() {
         let instrs = instructions("spawn { let x: 1 }");
         assert!(
-            instrs
-                .iter()
-                .any(|i| matches!(i, Instruction::Spawn { .. })),
+            instrs.iter().any(|i| matches!(i, Instruction::Spawn(_))),
             "expected Spawn instruction"
         );
     }
