@@ -1,6 +1,6 @@
 # YatsuScript
 
-`yatsuscript` is a Rust implementation of **YatsuScript**: a small, register-based bytecode interpreter with a custom runtime, NaN-boxed values, a managed heap, and async task execution on Tokio.
+`yatsuscript` is a small, register-based bytecode interpreter with a custom runtime, NaN-boxed values, a managed heap, and async task execution on Tokio.
 
 The current implementation is a fast interpreter rather than a machine-code JIT.
 

@@ -16,10 +16,11 @@
 
 use crate::compiler::{Loc, Program, Value};
 use crate::error::JitError;
+use parking_lot::{Mutex, RwLock};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 pub mod interpreter;
 
@@ -101,7 +102,7 @@ pub struct Context {
 }
 
 pub struct Heap {
-    pub objects: parking_lot::RwLock<Vec<Option<HeapObject>>>,
+    pub objects: RwLock<Vec<Option<HeapObject>>>,
     pub metadata: Mutex<HeapMetadata>,
     pub gc_count: AtomicU32,
     pub alloc_since_gc: AtomicUsize,
@@ -134,7 +135,7 @@ impl Heap {
             }
         }
 
-        let mut meta = self.metadata.lock().unwrap();
+        let mut meta = self.metadata.lock();
         meta.remembered_set.clear();
         meta.nursery_ids.clear();
 
@@ -163,7 +164,7 @@ impl Heap {
 
         self.trace_roots(ctx, &mut worklist);
         {
-            let meta = self.metadata.lock().unwrap();
+            let meta = self.metadata.lock();
             worklist.extend(meta.remembered_set.iter());
         }
 
@@ -176,7 +177,7 @@ impl Heap {
             }
         }
 
-        let mut meta = self.metadata.lock().unwrap();
+        let mut meta = self.metadata.lock();
         let mut promoted_ids = Vec::new();
 
         let ids: Vec<u32> = meta.nursery_ids.drain(..).collect();
@@ -234,9 +235,9 @@ impl Heap {
                 worklist.push(id);
             }
         }
-        let active_tasks = ctx.active_registers.lock().unwrap();
+        let active_tasks = ctx.active_registers.lock();
         for task_roots in active_tasks.iter() {
-            let regs_stack = task_roots.lock().unwrap();
+            let regs_stack = task_roots.lock();
             for regs in regs_stack.iter() {
                 for atomic_val in regs.iter() {
                     if let Some(id) =
@@ -327,7 +328,7 @@ impl Context {
         }
 
         let mut objects = self.heap.objects.write();
-        let mut meta = self.heap.metadata.lock().unwrap();
+        let mut meta = self.heap.metadata.lock();
 
         let id = if let Some(id) = meta.free_list.pop() {
             objects[id as usize] = Some(HeapObject {

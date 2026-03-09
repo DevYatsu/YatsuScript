@@ -5,12 +5,12 @@ use crate::{
     compiler::{Instruction, Program, QNAN, Value},
     error::JitError,
 };
-use parking_lot::RwLock;
-use std::future::Future;
+use parking_lot::{Mutex, RwLock};
 use std::io::Write;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::{future::Future, sync::atomic};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
@@ -143,16 +143,16 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
         globals,
         string_pool,
         callables,
-        active_registers: std::sync::Mutex::new(Vec::new()),
+        active_registers: Mutex::new(Vec::new()),
         heap: Heap {
             objects: RwLock::new(heap_init),
-            metadata: std::sync::Mutex::new(HeapMetadata {
+            metadata: Mutex::new(HeapMetadata {
                 free_list: Vec::new(),
                 nursery_ids: Vec::new(),
                 remembered_set: rustc_hash::FxHashSet::default(),
             }),
-            gc_count: std::sync::atomic::AtomicU32::new(0),
-            alloc_since_gc: std::sync::atomic::AtomicUsize::new(0),
+            gc_count: atomic::AtomicU32::new(0),
+            alloc_since_gc: atomic::AtomicUsize::new(0),
         },
     });
 
@@ -160,10 +160,7 @@ async fn run_interpreter(program: Program) -> Result<(), JitError> {
     let mut join_set = JoinSet::new();
     let task_roots = Arc::new(Mutex::new(Vec::with_capacity(32)));
 
-    ctx.active_registers
-        .lock()
-        .unwrap()
-        .push(task_roots.clone());
+    ctx.active_registers.lock().push(task_roots.clone());
 
     execute_bytecode(
         &program.instructions,
@@ -209,29 +206,29 @@ pub fn execute_bytecode<'a>(
     task_roots: Arc<Mutex<Vec<Arc<[AtomicU64]>>>>,
 ) -> Pin<Box<dyn Future<Output = Result<Value, JitError>> + Send + 'a>> {
     Box::pin(async move {
-    // RAII guard: restore the task root stack on exit.
-    struct RegGuard {
-        task_roots: Arc<Mutex<Vec<Arc<[AtomicU64]>>>>,
-        initial_len: usize,
-    }
-    impl Drop for RegGuard {
-        fn drop(&mut self) {
-            self.task_roots.lock().unwrap().truncate(self.initial_len);
+        // RAII guard: restore the task root stack on exit.
+        struct RegGuard {
+            task_roots: Arc<Mutex<Vec<Arc<[AtomicU64]>>>>,
+            initial_len: usize,
         }
-    }
-    let initial_root_len = {
-        let mut roots = task_roots.lock().unwrap();
-        let initial_len = roots.len();
-        roots.push(registers.clone());
-        initial_len
-    };
-    let _guard = RegGuard {
-        task_roots: task_roots.clone(),
-        initial_len: initial_root_len,
-    };
+        impl Drop for RegGuard {
+            fn drop(&mut self) {
+                self.task_roots.lock().truncate(self.initial_len);
+            }
+        }
+        let initial_root_len = {
+            let mut roots = task_roots.lock();
+            let initial_len = roots.len();
+            roots.push(registers.clone());
+            initial_len
+        };
+        let _guard = RegGuard {
+            task_roots: task_roots.clone(),
+            initial_len: initial_root_len,
+        };
 
-    // Numeric binary operation with fast-path for plain f64 bits.
-    macro_rules! binary_op {
+        // Numeric binary operation with fast-path for plain f64 bits.
+        macro_rules! binary_op {
         ($regs:expr, $dst:expr, $lhs:expr, $rhs:expr, $op:tt, $loc:expr) => {{
             let l_bits = unsafe { $regs.get_unchecked($lhs).load(Ordering::Relaxed) };
             let r_bits = unsafe { $regs.get_unchecked($rhs).load(Ordering::Relaxed) };
@@ -254,8 +251,8 @@ pub fn execute_bytecode<'a>(
         }};
     }
 
-    // Numeric comparison with fast-path for plain f64 bits.
-    macro_rules! compare_op {
+        // Numeric comparison with fast-path for plain f64 bits.
+        macro_rules! compare_op {
         ($regs:expr, $dst:expr, $lhs:expr, $rhs:expr, $op:tt, $loc:expr) => {{
             let l_bits = unsafe { $regs.get_unchecked($lhs).load(Ordering::Relaxed) };
             let r_bits = unsafe { $regs.get_unchecked($rhs).load(Ordering::Relaxed) };
@@ -283,131 +280,132 @@ pub fn execute_bytecode<'a>(
         }};
     }
 
-    // Perform a CAS-based increment on any AtomicU64 holding a NaN-boxed number.
-    macro_rules! atomic_increment {
-        ($ptr:expr) => {{
-            let mut old_bits = $ptr.load(Ordering::Relaxed);
-            loop {
-                let next = if (old_bits & QNAN) != QNAN {
-                    Value::number(f64::from_bits(old_bits) + 1.0)
-                } else if let Some(n) = Value::from_bits(old_bits).as_number() {
-                    Value::number(n + 1.0)
-                } else {
-                    break; // Not a number; silently skip
-                };
+        // Perform a CAS-based increment on any AtomicU64 holding a NaN-boxed number.
+        macro_rules! atomic_increment {
+            ($ptr:expr) => {{
+                let mut old_bits = $ptr.load(Ordering::Relaxed);
+                loop {
+                    let next = if (old_bits & QNAN) != QNAN {
+                        Value::number(f64::from_bits(old_bits) + 1.0)
+                    } else if let Some(n) = Value::from_bits(old_bits).as_number() {
+                        Value::number(n + 1.0)
+                    } else {
+                        break; // Not a number; silently skip
+                    };
 
-                match $ptr.compare_exchange_weak(
-                    old_bits,
-                    next.to_bits(),
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(actual) => old_bits = actual,
+                    match $ptr.compare_exchange_weak(
+                        old_bits,
+                        next.to_bits(),
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => old_bits = actual,
+                    }
                 }
-            }
-        }};
-    }
-
-    // Equality check shared by `Eq` and `Ne`.
-    #[inline(always)]
-    fn values_equal_fast(ctx: &Context, l_bits: u64, r_bits: u64) -> bool {
-        if l_bits == r_bits && (l_bits & QNAN) != QNAN {
-            true
-        } else {
-            ctx.values_equal(Value::from_bits(l_bits), Value::from_bits(r_bits))
-        }
-    }
-
-    let mut instr_count: u32 = 0;
-    let mut frames = vec![CallFrame {
-        instructions: Arc::clone(instructions),
-        registers: registers.clone(),
-        pc: 0,
-        return_to: None,
-    }];
-
-    // Main Dispatch Loop
-    loop {
-        if frames.is_empty() {
-            return Ok(Value::from_bits(0));
-        }
-        instr_count = instr_count.wrapping_add(1);
-
-        let frame_idx = frames.len() - 1;
-        let implicit_return = {
-            let frame = &frames[frame_idx];
-            frame.pc >= frame.instructions.len()
-        };
-
-        if implicit_return {
-            let frame = frames.pop().unwrap();
-            let ret_val = Value::from_bits(0);
-            task_roots.lock().unwrap().pop();
-            if let Some(target) = frame.return_to {
-                store_register(&target.registers, target.dst, ret_val);
-                continue;
-            }
-            if let Some(dst) = dst_reg {
-                dst.store(ret_val.to_bits(), Ordering::Relaxed);
-            }
-            return Ok(ret_val);
+            }};
         }
 
-        let instr = {
-            let frame = &frames[frame_idx];
-            unsafe { frame.instructions.get_unchecked(frame.pc).clone() }
-        };
+        // Equality check shared by `Eq` and `Ne`.
+        #[inline(always)]
+        fn values_equal_fast(ctx: &Context, l_bits: u64, r_bits: u64) -> bool {
+            if l_bits == r_bits && (l_bits & QNAN) != QNAN {
+                true
+            } else {
+                ctx.values_equal(Value::from_bits(l_bits), Value::from_bits(r_bits))
+            }
+        }
 
-        match instr {
-            Instruction::LoadLiteral { dst, val } => {
-                let frame = &mut frames[frame_idx];
-                store_register(&frame.registers, dst, val);
-                frame.pc += 1;
+        let mut instr_count: u32 = 0;
+        let mut frames = vec![CallFrame {
+            instructions: Arc::clone(instructions),
+            registers: registers.clone(),
+            pc: 0,
+            return_to: None,
+        }];
+
+        // Main Dispatch Loop
+        loop {
+            if frames.is_empty() {
+                return Ok(Value::from_bits(0));
             }
-            Instruction::Move { dst, src } => {
-                let frame = &mut frames[frame_idx];
-                let val = load_register(&frame.registers, src);
-                store_register(&frame.registers, dst, val);
-                frame.pc += 1;
-            }
-            Instruction::LoadGlobal { dst, global } => {
-                let frame = &mut frames[frame_idx];
-                let val = load_register(&ctx.globals, global);
-                store_register(&frame.registers, dst, val);
-                frame.pc += 1;
-            }
-            Instruction::StoreGlobal { global, src } => {
-                let frame = &mut frames[frame_idx];
-                let val = load_register(&frame.registers, src);
-                unsafe {
-                    ctx.globals
-                        .get_unchecked(global)
-                        .store(val.to_bits(), Ordering::Relaxed);
+            instr_count = instr_count.wrapping_add(1);
+
+            let frame_idx = frames.len() - 1;
+            let implicit_return = {
+                let frame = &frames[frame_idx];
+                frame.pc >= frame.instructions.len()
+            };
+
+            if implicit_return {
+                let frame = frames.pop().unwrap();
+                let ret_val = Value::from_bits(0);
+                task_roots.lock().pop();
+                if let Some(target) = frame.return_to {
+                    store_register(&target.registers, target.dst, ret_val);
+                    continue;
                 }
-                frame.pc += 1;
+                if let Some(dst) = dst_reg {
+                    dst.store(ret_val.to_bits(), Ordering::Relaxed);
+                }
+                return Ok(ret_val);
             }
 
-            // --- Calls ---
-            Instruction::Call(box_data) => {
-                let crate::compiler::CallData {
-                    name_id,
-                    args_regs,
-                    dst,
-                    loc,
-                } = *box_data;
-                let callable = ctx.get_callable(name_id).cloned().ok_or_else(|| {
-                    let name = unsafe { ctx.string_pool.get_unchecked(name_id as usize) };
-                    JitError::runtime(
-                        format!("Unknown function: {}", name),
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
+            let instr = {
+                let frame = &frames[frame_idx];
+                unsafe { frame.instructions.get_unchecked(frame.pc).clone() }
+            };
 
-                // For user functions, verify arity before building registers.
-                if let Callable::User(func) = &callable
-                    && args_regs.len() != func.params_count {
+            match instr {
+                Instruction::LoadLiteral { dst, val } => {
+                    let frame = &mut frames[frame_idx];
+                    store_register(&frame.registers, dst, val);
+                    frame.pc += 1;
+                }
+                Instruction::Move { dst, src } => {
+                    let frame = &mut frames[frame_idx];
+                    let val = load_register(&frame.registers, src);
+                    store_register(&frame.registers, dst, val);
+                    frame.pc += 1;
+                }
+                Instruction::LoadGlobal { dst, global } => {
+                    let frame = &mut frames[frame_idx];
+                    let val = load_register(&ctx.globals, global);
+                    store_register(&frame.registers, dst, val);
+                    frame.pc += 1;
+                }
+                Instruction::StoreGlobal { global, src } => {
+                    let frame = &mut frames[frame_idx];
+                    let val = load_register(&frame.registers, src);
+                    unsafe {
+                        ctx.globals
+                            .get_unchecked(global)
+                            .store(val.to_bits(), Ordering::Relaxed);
+                    }
+                    frame.pc += 1;
+                }
+
+                // --- Calls ---
+                Instruction::Call(box_data) => {
+                    let crate::compiler::CallData {
+                        name_id,
+                        args_regs,
+                        dst,
+                        loc,
+                    } = *box_data;
+                    let callable = ctx.get_callable(name_id).cloned().ok_or_else(|| {
+                        let name = unsafe { ctx.string_pool.get_unchecked(name_id as usize) };
+                        JitError::runtime(
+                            format!("Unknown function: {}", name),
+                            loc.line as usize,
+                            loc.col as usize,
+                        )
+                    })?;
+
+                    // For user functions, verify arity before building registers.
+                    if let Callable::User(func) = &callable
+                        && args_regs.len() != func.params_count
+                    {
                         return Err(JitError::runtime(
                             format!(
                                 "Function arity mismatch: expected {}, got {}",
@@ -419,65 +417,66 @@ pub fn execute_bytecode<'a>(
                         ));
                     }
 
-                let args: Vec<Value> = {
-                    let frame = &frames[frame_idx];
-                    args_regs
-                        .iter()
-                        .map(|&r| load_register(&frame.registers, r))
-                        .collect()
-                };
-
-                match callable {
-                    Callable::Native(native_fn) => {
-                        let res = native_fn(ctx.clone(), args, loc).await?;
-                        let frame = &mut frames[frame_idx];
-                        if let Some(dst_idx) = dst {
-                            store_register(&frame.registers, dst_idx, res);
-                        }
-                        frame.pc += 1;
-                    }
-                    Callable::User(func) => {
-                        let return_to = dst.map(|dst_idx| ReturnTarget {
-                            registers: Arc::clone(&frames[frame_idx].registers),
-                            dst: dst_idx,
-                        });
-                        frames[frame_idx].pc += 1;
-
-                        let callee_regs = build_call_registers(func.locals_count, &args);
-                        task_roots.lock().unwrap().push(callee_regs.clone());
-                        frames.push(CallFrame {
-                            instructions: func.instructions,
-                            registers: callee_regs,
-                            pc: 0,
-                            return_to,
-                        });
-                    }
-                }
-            }
-
-            Instruction::CallDynamic(box_data) => {
-                let crate::compiler::CallDynamicData {
-                    callee_reg,
-                    args_regs,
-                    dst,
-                    loc,
-                } = *box_data;
-                let (callee_val, args): (Value, Vec<Value>) = {
-                    let frame = &frames[frame_idx];
-                    (
-                        load_register(&frame.registers, callee_reg),
+                    let args: Vec<Value> = {
+                        let frame = &frames[frame_idx];
                         args_regs
                             .iter()
                             .map(|&r| load_register(&frame.registers, r))
-                            .collect(),
-                    )
-                };
+                            .collect()
+                    };
 
-                // Handle BoundMethod (e.g., range.step(...) or list.pad(...))
-                if let Some(oid) = callee_val.as_obj_id() {
-                    let heap = ctx.heap.objects.read();
-                    if let Some(Some(obj_ref)) = heap.get(oid as usize)
-                        && let ManagedObject::BoundMethod { receiver, name_id } = &obj_ref.obj {
+                    match callable {
+                        Callable::Native(native_fn) => {
+                            let res = native_fn(ctx.clone(), args, loc).await?;
+                            let frame = &mut frames[frame_idx];
+                            if let Some(dst_idx) = dst {
+                                store_register(&frame.registers, dst_idx, res);
+                            }
+                            frame.pc += 1;
+                        }
+                        Callable::User(func) => {
+                            let return_to = dst.map(|dst_idx| ReturnTarget {
+                                registers: Arc::clone(&frames[frame_idx].registers),
+                                dst: dst_idx,
+                            });
+                            frames[frame_idx].pc += 1;
+
+                            let callee_regs = build_call_registers(func.locals_count, &args);
+                            task_roots.lock().push(callee_regs.clone());
+                            frames.push(CallFrame {
+                                instructions: func.instructions,
+                                registers: callee_regs,
+                                pc: 0,
+                                return_to,
+                            });
+                        }
+                    }
+                }
+
+                Instruction::CallDynamic(box_data) => {
+                    let crate::compiler::CallDynamicData {
+                        callee_reg,
+                        args_regs,
+                        dst,
+                        loc,
+                    } = *box_data;
+                    let (callee_val, args): (Value, Vec<Value>) = {
+                        let frame = &frames[frame_idx];
+                        (
+                            load_register(&frame.registers, callee_reg),
+                            args_regs
+                                .iter()
+                                .map(|&r| load_register(&frame.registers, r))
+                                .collect(),
+                        )
+                    };
+
+                    // Handle BoundMethod (e.g., range.step(...) or list.pad(...))
+                    if let Some(oid) = callee_val.as_obj_id() {
+                        let heap = ctx.heap.objects.read();
+                        if let Some(Some(obj_ref)) = heap.get(oid as usize)
+                            && let ManagedObject::BoundMethod { receiver, name_id } = &obj_ref.obj
+                        {
                             let method = pool_name(&ctx, *name_id).to_owned();
                             let receiver_val = *receiver;
                             drop(heap);
@@ -495,54 +494,59 @@ pub fn execute_bytecode<'a>(
                                         .to_bits();
                                     let heap = ctx.heap.objects.read();
                                     if let Some(Some(list_obj)) = heap.get(list_oid as usize)
-                                        && let ManagedObject::List(elements) = &list_obj.obj {
-                                            let mut w = elements.write();
-                                            if w.len() < n {
-                                                w.resize_with(n, || AtomicU64::new(fill_bits));
-                                            }
+                                        && let ManagedObject::List(elements) = &list_obj.obj
+                                    {
+                                        let mut w = elements.write();
+                                        if w.len() < n {
+                                            w.resize_with(n, || AtomicU64::new(fill_bits));
                                         }
+                                    }
                                 }
                                 frames[frame_idx].pc += 1;
                                 continue;
                             } else if method == "step"
-                                && let Some(r_oid) = receiver_val.as_obj_id() {
-                                    // Extract start/end while holding the read-lock, then drop
-                                    // it before calling ctx.alloc(), which needs the write-lock.
-                                    let range_vals = {
-                                        let heap = ctx.heap.objects.read();
-                                        if let Some(Some(r_obj)) = heap.get(r_oid as usize) {
-                                            if let ManagedObject::Range { start, end, .. } =
-                                                &r_obj.obj
-                                            {
-                                                Some((*start, *end))
-                                            } else {
-                                                None
-                                            }
+                                && let Some(r_oid) = receiver_val.as_obj_id()
+                            {
+                                // Extract start/end while holding the read-lock, then drop
+                                // it before calling ctx.alloc(), which needs the write-lock.
+                                let range_vals = {
+                                    let heap = ctx.heap.objects.read();
+                                    if let Some(Some(r_obj)) = heap.get(r_oid as usize) {
+                                        if let ManagedObject::Range { start, end, .. } = &r_obj.obj
+                                        {
+                                            Some((*start, *end))
                                         } else {
                                             None
                                         }
-                                    }; // <-- read-lock dropped here
-
-                                    if let Some((start, end)) = range_vals {
-                                        let new_step =
-                                            args.first().and_then(|v| v.as_number()).unwrap_or(1.0);
-                                        let temp = AtomicU64::new(0);
-                                        ctx.alloc(
-                                            ManagedObject::Range {
-                                                start,
-                                                end,
-                                                step: new_step,
-                                            },
-                                            &temp,
-                                        );
-                                        if let Some(dst_idx) = dst {
-                                            let frame = &mut frames[frame_idx];
-                                            store_register(&frame.registers, dst_idx, Value::from_bits(temp.load(Ordering::Relaxed)));
-                                        }
-                                        frames[frame_idx].pc += 1;
-                                        continue;
+                                    } else {
+                                        None
                                     }
+                                }; // <-- read-lock dropped here
+
+                                if let Some((start, end)) = range_vals {
+                                    let new_step =
+                                        args.first().and_then(|v| v.as_number()).unwrap_or(1.0);
+                                    let temp = AtomicU64::new(0);
+                                    ctx.alloc(
+                                        ManagedObject::Range {
+                                            start,
+                                            end,
+                                            step: new_step,
+                                        },
+                                        &temp,
+                                    );
+                                    if let Some(dst_idx) = dst {
+                                        let frame = &mut frames[frame_idx];
+                                        store_register(
+                                            &frame.registers,
+                                            dst_idx,
+                                            Value::from_bits(temp.load(Ordering::Relaxed)),
+                                        );
+                                    }
+                                    frames[frame_idx].pc += 1;
+                                    continue;
                                 }
+                            }
                             // Unknown bound method — fall through to produce a clear error.
                             return Err(JitError::runtime(
                                 format!("Unknown method '{}'", method),
@@ -550,387 +554,327 @@ pub fn execute_bytecode<'a>(
                                 loc.col as usize,
                             ));
                         }
-                }
-
-                let name_id = ctx.value_as_pool_id(callee_val).ok_or_else(|| {
-                    JitError::runtime(
-                        "Callee is not a known function name",
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
-
-                let callable = ctx.get_callable(name_id).cloned().ok_or_else(|| {
-                    JitError::runtime(
-                        format!(
-                            "Dynamic call: unknown function '{}'",
-                            pool_name(&ctx, name_id)
-                        ),
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
-
-                match callable {
-                    Callable::Native(native_fn) => {
-                        let res = native_fn(ctx.clone(), args, loc).await?;
-                        let frame = &mut frames[frame_idx];
-                        if let Some(dst_idx) = dst {
-                            store_register(&frame.registers, dst_idx, res);
-                        }
-                        frame.pc += 1;
                     }
-                    Callable::User(func) => {
-                        if args_regs.len() != func.params_count {
-                            return Err(JitError::runtime(
-                                format!(
-                                    "Function arity mismatch: expected {}, got {}",
-                                    func.params_count,
-                                    args_regs.len()
-                                ),
-                                loc.line as usize,
-                                loc.col as usize,
-                            ));
-                        }
 
-                        let return_to = dst.map(|dst_idx| ReturnTarget {
-                            registers: Arc::clone(&frames[frame_idx].registers),
-                            dst: dst_idx,
-                        });
-                        frames[frame_idx].pc += 1;
-
-                        let callee_regs = build_call_registers(func.locals_count, &args);
-                        task_roots.lock().unwrap().push(callee_regs.clone());
-                        frames.push(CallFrame {
-                            instructions: func.instructions,
-                            registers: callee_regs,
-                            pc: 0,
-                            return_to,
-                        });
-                    }
-                }
-            }
-
-            // --- Control flow ---
-            Instruction::Return(val_reg) => {
-                let ret_val = val_reg
-                    .map(|r| load_register(&frames[frame_idx].registers, r))
-                    .unwrap_or_else(|| Value::from_bits(0));
-                let frame = frames.pop().unwrap();
-                task_roots.lock().unwrap().pop();
-                if let Some(target) = frame.return_to {
-                    store_register(&target.registers, target.dst, ret_val);
-                    continue;
-                }
-                if let Some(dst) = dst_reg {
-                    dst.store(ret_val.to_bits(), Ordering::Relaxed);
-                }
-                return Ok(ret_val);
-            }
-            Instruction::Jump(target) => {
-                frames[frame_idx].pc = target;
-                continue;
-            }
-            Instruction::JumpIfFalse { cond, target } => {
-                let frame = &mut frames[frame_idx];
-                if !load_register(&frame.registers, cond).is_truthy() {
-                    frame.pc = target;
-                    continue;
-                }
-                frame.pc += 1;
-            }
-
-            // --- Ranges ---
-            Instruction::Range {
-                dst,
-                start,
-                end,
-                step,
-                loc,
-            } => {
-                let frame = &mut frames[frame_idx];
-                let start_val = load_register(&frame.registers, start).as_number().ok_or_else(|| {
-                    JitError::runtime(
-                        "Range start must be a number",
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
-                let end_val = load_register(&frame.registers, end).as_number().ok_or_else(|| {
-                    JitError::runtime(
-                        "Range end must be a number",
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
-                let step_val = if let Some(step_reg) = step {
-                    load_register(&frame.registers, step_reg).as_number().ok_or_else(|| {
+                    let name_id = ctx.value_as_pool_id(callee_val).ok_or_else(|| {
                         JitError::runtime(
-                            "Range step must be a number",
+                            "Callee is not a known function name",
                             loc.line as usize,
                             loc.col as usize,
                         )
-                    })?
-                } else {
-                    1.0
-                };
+                    })?;
 
-                ctx.alloc(
-                    ManagedObject::Range {
-                        start: start_val,
-                        end: end_val,
-                        step: step_val,
-                    },
-                    unsafe { frame.registers.get_unchecked(dst) },
-                );
-                frame.pc += 1;
-            }
-            Instruction::RangeInfo {
-                range,
-                start_dst,
-                end_dst,
-                step_dst,
-            } => {
-                let frame = &mut frames[frame_idx];
-                let range_val = load_register(&frame.registers, range);
-                let (s, e, st) = if let Some(oid) = range_val.as_obj_id() {
-                    let heap = ctx.heap.objects.read();
-                    if let Some(Some(obj_ref)) = heap.get(oid as usize) {
-                        if let ManagedObject::Range { start, end, step } = &obj_ref.obj {
-                            (*start, *end, *step)
+                    let callable = ctx.get_callable(name_id).cloned().ok_or_else(|| {
+                        JitError::runtime(
+                            format!(
+                                "Dynamic call: unknown function '{}'",
+                                pool_name(&ctx, name_id)
+                            ),
+                            loc.line as usize,
+                            loc.col as usize,
+                        )
+                    })?;
+
+                    match callable {
+                        Callable::Native(native_fn) => {
+                            let res = native_fn(ctx.clone(), args, loc).await?;
+                            let frame = &mut frames[frame_idx];
+                            if let Some(dst_idx) = dst {
+                                store_register(&frame.registers, dst_idx, res);
+                            }
+                            frame.pc += 1;
+                        }
+                        Callable::User(func) => {
+                            if args_regs.len() != func.params_count {
+                                return Err(JitError::runtime(
+                                    format!(
+                                        "Function arity mismatch: expected {}, got {}",
+                                        func.params_count,
+                                        args_regs.len()
+                                    ),
+                                    loc.line as usize,
+                                    loc.col as usize,
+                                ));
+                            }
+
+                            let return_to = dst.map(|dst_idx| ReturnTarget {
+                                registers: Arc::clone(&frames[frame_idx].registers),
+                                dst: dst_idx,
+                            });
+                            frames[frame_idx].pc += 1;
+
+                            let callee_regs = build_call_registers(func.locals_count, &args);
+                            task_roots.lock().push(callee_regs.clone());
+                            frames.push(CallFrame {
+                                instructions: func.instructions,
+                                registers: callee_regs,
+                                pc: 0,
+                                return_to,
+                            });
+                        }
+                    }
+                }
+
+                // --- Control flow ---
+                Instruction::Return(val_reg) => {
+                    let ret_val = val_reg
+                        .map(|r| load_register(&frames[frame_idx].registers, r))
+                        .unwrap_or_else(|| Value::from_bits(0));
+                    let frame = frames.pop().unwrap();
+                    task_roots.lock().pop();
+                    if let Some(target) = frame.return_to {
+                        store_register(&target.registers, target.dst, ret_val);
+                        continue;
+                    }
+                    if let Some(dst) = dst_reg {
+                        dst.store(ret_val.to_bits(), Ordering::Relaxed);
+                    }
+                    return Ok(ret_val);
+                }
+                Instruction::Jump(target) => {
+                    frames[frame_idx].pc = target;
+                    continue;
+                }
+                Instruction::JumpIfFalse { cond, target } => {
+                    let frame = &mut frames[frame_idx];
+                    if !load_register(&frame.registers, cond).is_truthy() {
+                        frame.pc = target;
+                        continue;
+                    }
+                    frame.pc += 1;
+                }
+
+                // --- Ranges ---
+                Instruction::Range {
+                    dst,
+                    start,
+                    end,
+                    step,
+                    loc,
+                } => {
+                    let frame = &mut frames[frame_idx];
+                    let start_val = load_register(&frame.registers, start)
+                        .as_number()
+                        .ok_or_else(|| {
+                            JitError::runtime(
+                                "Range start must be a number",
+                                loc.line as usize,
+                                loc.col as usize,
+                            )
+                        })?;
+                    let end_val = load_register(&frame.registers, end)
+                        .as_number()
+                        .ok_or_else(|| {
+                            JitError::runtime(
+                                "Range end must be a number",
+                                loc.line as usize,
+                                loc.col as usize,
+                            )
+                        })?;
+                    let step_val = if let Some(step_reg) = step {
+                        load_register(&frame.registers, step_reg)
+                            .as_number()
+                            .ok_or_else(|| {
+                                JitError::runtime(
+                                    "Range step must be a number",
+                                    loc.line as usize,
+                                    loc.col as usize,
+                                )
+                            })?
+                    } else {
+                        1.0
+                    };
+
+                    ctx.alloc(
+                        ManagedObject::Range {
+                            start: start_val,
+                            end: end_val,
+                            step: step_val,
+                        },
+                        unsafe { frame.registers.get_unchecked(dst) },
+                    );
+                    frame.pc += 1;
+                }
+                Instruction::RangeInfo {
+                    range,
+                    start_dst,
+                    end_dst,
+                    step_dst,
+                } => {
+                    let frame = &mut frames[frame_idx];
+                    let range_val = load_register(&frame.registers, range);
+                    let (s, e, st) = if let Some(oid) = range_val.as_obj_id() {
+                        let heap = ctx.heap.objects.read();
+                        if let Some(Some(obj_ref)) = heap.get(oid as usize) {
+                            if let ManagedObject::Range { start, end, step } = &obj_ref.obj {
+                                (*start, *end, *step)
+                            } else {
+                                (0.0, 0.0, 1.0)
+                            }
                         } else {
                             (0.0, 0.0, 1.0)
                         }
                     } else {
                         (0.0, 0.0, 1.0)
-                    }
-                } else {
-                    (0.0, 0.0, 1.0)
-                };
-                store_register(&frame.registers, start_dst, Value::number(s));
-                store_register(&frame.registers, end_dst, Value::number(e));
-                store_register(&frame.registers, step_dst, Value::number(st));
-                frame.pc += 1;
-            }
+                    };
+                    store_register(&frame.registers, start_dst, Value::number(s));
+                    store_register(&frame.registers, end_dst, Value::number(e));
+                    store_register(&frame.registers, step_dst, Value::number(st));
+                    frame.pc += 1;
+                }
 
-            // --- Arithmetic ---
-            Instruction::Not { dst, src, .. } => {
-                let frame = &mut frames[frame_idx];
-                store_register(
-                    &frame.registers,
-                    dst,
-                    Value::bool(!load_register(&frame.registers, src).is_truthy()),
-                );
-                frame.pc += 1;
-            }
-            Instruction::Add { dst, lhs, rhs, loc } => {
-                let frame = &mut frames[frame_idx];
-                let l_val = load_register(&frame.registers, lhs);
-                let r_val = load_register(&frame.registers, rhs);
-                let l_bits = l_val.to_bits();
-                let r_bits = r_val.to_bits();
-
-                if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                    // Fast path: plain f64 + f64
+                // --- Arithmetic ---
+                Instruction::Not { dst, src, .. } => {
+                    let frame = &mut frames[frame_idx];
                     store_register(
                         &frame.registers,
                         dst,
-                        Value::number(f64::from_bits(l_bits) + f64::from_bits(r_bits)),
+                        Value::bool(!load_register(&frame.registers, src).is_truthy()),
                     );
-                } else if let (Some(lv), Some(rv)) = (l_val.as_number(), r_val.as_number()) {
-                    store_register(&frame.registers, dst, Value::number(lv + rv));
-                } else {
-                    // String concatenation
-                    let combined = l_val
-                        .with_str(&ctx, |l_str| {
-                            r_val.with_str(&ctx, |r_str| {
-                                let mut s = String::with_capacity(l_str.len() + r_str.len());
-                                s.push_str(l_str);
-                                s.push_str(r_str);
-                                s
-                            })
-                        })
-                        .flatten();
+                    frame.pc += 1;
+                }
+                Instruction::Add { dst, lhs, rhs, loc } => {
+                    let frame = &mut frames[frame_idx];
+                    let l_val = load_register(&frame.registers, lhs);
+                    let r_val = load_register(&frame.registers, rhs);
+                    let l_bits = l_val.to_bits();
+                    let r_bits = r_val.to_bits();
 
-                    match combined {
-                        Some(s) if Value::sso(&s).is_some() => {
-                            store_register(&frame.registers, dst, Value::sso(&s).unwrap());
-                        }
-                        Some(s) => {
-                            ctx.alloc(ManagedObject::String(Arc::from(s)), unsafe {
-                                frame.registers.get_unchecked(dst)
-                            });
-                        }
-                        None => {
-                            return Err(JitError::runtime(
-                                "Add error: expected numbers or strings",
-                                loc.line as usize,
-                                loc.col as usize,
-                            ));
+                    if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
+                        // Fast path: plain f64 + f64
+                        store_register(
+                            &frame.registers,
+                            dst,
+                            Value::number(f64::from_bits(l_bits) + f64::from_bits(r_bits)),
+                        );
+                    } else if let (Some(lv), Some(rv)) = (l_val.as_number(), r_val.as_number()) {
+                        store_register(&frame.registers, dst, Value::number(lv + rv));
+                    } else {
+                        // String concatenation
+                        let combined = l_val
+                            .with_str(&ctx, |l_str| {
+                                r_val.with_str(&ctx, |r_str| {
+                                    let mut s = String::with_capacity(l_str.len() + r_str.len());
+                                    s.push_str(l_str);
+                                    s.push_str(r_str);
+                                    s
+                                })
+                            })
+                            .flatten();
+
+                        match combined {
+                            Some(s) if Value::sso(&s).is_some() => {
+                                store_register(&frame.registers, dst, Value::sso(&s).unwrap());
+                            }
+                            Some(s) => {
+                                ctx.alloc(ManagedObject::String(Arc::from(s)), unsafe {
+                                    frame.registers.get_unchecked(dst)
+                                });
+                            }
+                            None => {
+                                return Err(JitError::runtime(
+                                    "Add error: expected numbers or strings",
+                                    loc.line as usize,
+                                    loc.col as usize,
+                                ));
+                            }
                         }
                     }
+                    frame.pc += 1;
                 }
-                frame.pc += 1;
-            }
-            Instruction::Sub { dst, lhs, rhs, loc } => {
-                let frame = &mut frames[frame_idx];
-                binary_op!(&frame.registers, dst, lhs, rhs, -, loc);
-                frame.pc += 1;
-            }
-            Instruction::Mul { dst, lhs, rhs, loc } => {
-                let frame = &mut frames[frame_idx];
-                binary_op!(&frame.registers, dst, lhs, rhs, *, loc);
-                frame.pc += 1;
-            }
-            Instruction::Div { dst, lhs, rhs, loc } => {
-                let frame = &mut frames[frame_idx];
-                binary_op!(&frame.registers, dst, lhs, rhs, /, loc);
-                frame.pc += 1;
-            }
-
-            // --- Increment ---
-            Instruction::Increment(reg) => {
-                let frame = &mut frames[frame_idx];
-                atomic_increment!(unsafe { frame.registers.get_unchecked(reg) });
-                frame.pc += 1;
-            }
-            Instruction::IncrementGlobal(global) => {
-                atomic_increment!(unsafe { ctx.globals.get_unchecked(global) });
-                frames[frame_idx].pc += 1;
-            }
-
-            // --- Equality / Comparison ---
-            Instruction::Eq { dst, lhs, rhs } => {
-                let frame = &mut frames[frame_idx];
-                let l_bits = unsafe { frame.registers.get_unchecked(lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { frame.registers.get_unchecked(rhs).load(Ordering::Relaxed) };
-                store_register(
-                    &frame.registers,
-                    dst,
-                    Value::bool(values_equal_fast(&ctx, l_bits, r_bits)),
-                );
-                frame.pc += 1;
-            }
-            Instruction::Ne { dst, lhs, rhs } => {
-                let frame = &mut frames[frame_idx];
-                let l_bits = unsafe { frame.registers.get_unchecked(lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { frame.registers.get_unchecked(rhs).load(Ordering::Relaxed) };
-                store_register(
-                    &frame.registers,
-                    dst,
-                    Value::bool(!values_equal_fast(&ctx, l_bits, r_bits)),
-                );
-                frame.pc += 1;
-            }
-            Instruction::Lt { dst, lhs, rhs, loc } => {
-                let frame = &mut frames[frame_idx];
-                compare_op!(&frame.registers, dst, lhs, rhs, <, loc);
-                frame.pc += 1;
-            }
-            Instruction::Le { dst, lhs, rhs, loc } => {
-                let frame = &mut frames[frame_idx];
-                compare_op!(&frame.registers, dst, lhs, rhs, <=, loc);
-                frame.pc += 1;
-            }
-            Instruction::Gt { dst, lhs, rhs, loc } => {
-                let frame = &mut frames[frame_idx];
-                compare_op!(&frame.registers, dst, lhs, rhs, >, loc);
-                frame.pc += 1;
-            }
-            Instruction::Ge { dst, lhs, rhs, loc } => {
-                let frame = &mut frames[frame_idx];
-                compare_op!(&frame.registers, dst, lhs, rhs, >=, loc);
-                frame.pc += 1;
-            }
-
-            // --- Lists ---
-            Instruction::NewList { dst, len } => {
-                let frame = &mut frames[frame_idx];
-                let elements: Vec<AtomicU64> = (0..len).map(|_| AtomicU64::new(0)).collect();
-                ctx.alloc(ManagedObject::List(RwLock::new(elements)), unsafe {
-                    frame.registers.get_unchecked(dst)
-                });
-                frame.pc += 1;
-            }
-            Instruction::ListGet {
-                dst,
-                list,
-                index_reg,
-                loc,
-            } => {
-                let frame = &mut frames[frame_idx];
-                let list_val = load_register(&frame.registers, list);
-                let index = load_register(&frame.registers, index_reg)
-                    .as_number()
-                    .map(|n| n as usize)
-                    .ok_or_else(|| {
-                        JitError::runtime(
-                            "List index must be a number",
-                            loc.line as usize,
-                            loc.col as usize,
-                        )
-                    })?;
-
-                let oid = list_val.as_obj_id().ok_or_else(|| {
-                    JitError::runtime(
-                        "Expected list for indexing",
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
-                let heap = ctx.heap.objects.read();
-                let obj = heap
-                    .get(oid as usize)
-                    .and_then(|o| o.as_ref())
-                    .ok_or_else(|| {
-                        JitError::runtime(
-                            "Expected list for indexing",
-                            loc.line as usize,
-                            loc.col as usize,
-                        )
-                    })?;
-                let ManagedObject::List(elements) = &obj.obj else {
-                    return Err(JitError::runtime(
-                        "Expected list for indexing",
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                };
-                let lock = elements.read();
-                let slot = lock.get(index).ok_or_else(|| {
-                    JitError::runtime(
-                        format!(
-                            "Index out of bounds: {} for list of length {}",
-                            index,
-                            lock.len()
-                        ),
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
-                unsafe {
-                    frame.registers
-                        .get_unchecked(dst)
-                        .store(slot.load(Ordering::Relaxed), Ordering::Relaxed);
+                Instruction::Sub { dst, lhs, rhs, loc } => {
+                    let frame = &mut frames[frame_idx];
+                    binary_op!(&frame.registers, dst, lhs, rhs, -, loc);
+                    frame.pc += 1;
                 }
-                frame.pc += 1;
-            }
-            Instruction::ListSet {
-                list,
-                index_reg,
-                src,
-                loc,
-            } => {
-                let frame = &mut frames[frame_idx];
-                let list_val = load_register(&frame.registers, list);
-                let index_bits =
-                    unsafe { frame.registers.get_unchecked(index_reg).load(Ordering::Relaxed) };
-                let src_bits = unsafe { frame.registers.get_unchecked(src).load(Ordering::Relaxed) };
+                Instruction::Mul { dst, lhs, rhs, loc } => {
+                    let frame = &mut frames[frame_idx];
+                    binary_op!(&frame.registers, dst, lhs, rhs, *, loc);
+                    frame.pc += 1;
+                }
+                Instruction::Div { dst, lhs, rhs, loc } => {
+                    let frame = &mut frames[frame_idx];
+                    binary_op!(&frame.registers, dst, lhs, rhs, /, loc);
+                    frame.pc += 1;
+                }
 
-                let index = if (index_bits & QNAN) != QNAN {
-                    f64::from_bits(index_bits) as usize
-                } else {
-                    Value::from_bits(index_bits)
+                // --- Increment ---
+                Instruction::Increment(reg) => {
+                    let frame = &mut frames[frame_idx];
+                    atomic_increment!(unsafe { frame.registers.get_unchecked(reg) });
+                    frame.pc += 1;
+                }
+                Instruction::IncrementGlobal(global) => {
+                    atomic_increment!(unsafe { ctx.globals.get_unchecked(global) });
+                    frames[frame_idx].pc += 1;
+                }
+
+                // --- Equality / Comparison ---
+                Instruction::Eq { dst, lhs, rhs } => {
+                    let frame = &mut frames[frame_idx];
+                    let l_bits =
+                        unsafe { frame.registers.get_unchecked(lhs).load(Ordering::Relaxed) };
+                    let r_bits =
+                        unsafe { frame.registers.get_unchecked(rhs).load(Ordering::Relaxed) };
+                    store_register(
+                        &frame.registers,
+                        dst,
+                        Value::bool(values_equal_fast(&ctx, l_bits, r_bits)),
+                    );
+                    frame.pc += 1;
+                }
+                Instruction::Ne { dst, lhs, rhs } => {
+                    let frame = &mut frames[frame_idx];
+                    let l_bits =
+                        unsafe { frame.registers.get_unchecked(lhs).load(Ordering::Relaxed) };
+                    let r_bits =
+                        unsafe { frame.registers.get_unchecked(rhs).load(Ordering::Relaxed) };
+                    store_register(
+                        &frame.registers,
+                        dst,
+                        Value::bool(!values_equal_fast(&ctx, l_bits, r_bits)),
+                    );
+                    frame.pc += 1;
+                }
+                Instruction::Lt { dst, lhs, rhs, loc } => {
+                    let frame = &mut frames[frame_idx];
+                    compare_op!(&frame.registers, dst, lhs, rhs, <, loc);
+                    frame.pc += 1;
+                }
+                Instruction::Le { dst, lhs, rhs, loc } => {
+                    let frame = &mut frames[frame_idx];
+                    compare_op!(&frame.registers, dst, lhs, rhs, <=, loc);
+                    frame.pc += 1;
+                }
+                Instruction::Gt { dst, lhs, rhs, loc } => {
+                    let frame = &mut frames[frame_idx];
+                    compare_op!(&frame.registers, dst, lhs, rhs, >, loc);
+                    frame.pc += 1;
+                }
+                Instruction::Ge { dst, lhs, rhs, loc } => {
+                    let frame = &mut frames[frame_idx];
+                    compare_op!(&frame.registers, dst, lhs, rhs, >=, loc);
+                    frame.pc += 1;
+                }
+
+                // --- Lists ---
+                Instruction::NewList { dst, len } => {
+                    let frame = &mut frames[frame_idx];
+                    let elements: Vec<AtomicU64> = (0..len).map(|_| AtomicU64::new(0)).collect();
+                    ctx.alloc(ManagedObject::List(RwLock::new(elements)), unsafe {
+                        frame.registers.get_unchecked(dst)
+                    });
+                    frame.pc += 1;
+                }
+                Instruction::ListGet {
+                    dst,
+                    list,
+                    index_reg,
+                    loc,
+                } => {
+                    let frame = &mut frames[frame_idx];
+                    let list_val = load_register(&frame.registers, list);
+                    let index = load_register(&frame.registers, index_reg)
                         .as_number()
                         .map(|n| n as usize)
                         .ok_or_else(|| {
@@ -939,247 +883,342 @@ pub fn execute_bytecode<'a>(
                                 loc.line as usize,
                                 loc.col as usize,
                             )
-                        })?
-                };
+                        })?;
 
-                let oid = list_val.as_obj_id().ok_or_else(|| {
-                    JitError::runtime(
-                        "Expected list for indexing",
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
-                let heap = ctx.heap.objects.read();
-                let obj = heap
-                    .get(oid as usize)
-                    .and_then(|o| o.as_ref())
-                    .ok_or_else(|| {
+                    let oid = list_val.as_obj_id().ok_or_else(|| {
                         JitError::runtime(
                             "Expected list for indexing",
                             loc.line as usize,
                             loc.col as usize,
                         )
                     })?;
-                let ManagedObject::List(elements) = &obj.obj else {
-                    return Err(JitError::runtime(
-                        "Expected list for indexing",
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                };
-
-                // Grow the list if needed (double-checked to avoid data race).
-                if elements.read().len() <= index {
-                    let mut write = elements.write();
-                    if write.len() <= index {
-                        write.resize_with(index + 1, Default::default);
+                    let heap = ctx.heap.objects.read();
+                    let obj = heap
+                        .get(oid as usize)
+                        .and_then(|o| o.as_ref())
+                        .ok_or_else(|| {
+                            JitError::runtime(
+                                "Expected list for indexing",
+                                loc.line as usize,
+                                loc.col as usize,
+                            )
+                        })?;
+                    let ManagedObject::List(elements) = &obj.obj else {
+                        return Err(JitError::runtime(
+                            "Expected list for indexing",
+                            loc.line as usize,
+                            loc.col as usize,
+                        ));
+                    };
+                    let lock = elements.read();
+                    let slot = lock.get(index).ok_or_else(|| {
+                        JitError::runtime(
+                            format!(
+                                "Index out of bounds: {} for list of length {}",
+                                index,
+                                lock.len()
+                            ),
+                            loc.line as usize,
+                            loc.col as usize,
+                        )
+                    })?;
+                    unsafe {
+                        frame
+                            .registers
+                            .get_unchecked(dst)
+                            .store(slot.load(Ordering::Relaxed), Ordering::Relaxed);
                     }
-                    write[index].store(src_bits, Ordering::Relaxed);
-                } else {
-                    elements.read()[index].store(src_bits, Ordering::Relaxed);
+                    frame.pc += 1;
                 }
+                Instruction::ListSet {
+                    list,
+                    index_reg,
+                    src,
+                    loc,
+                } => {
+                    let frame = &mut frames[frame_idx];
+                    let list_val = load_register(&frame.registers, list);
+                    let index_bits = unsafe {
+                        frame
+                            .registers
+                            .get_unchecked(index_reg)
+                            .load(Ordering::Relaxed)
+                    };
+                    let src_bits =
+                        unsafe { frame.registers.get_unchecked(src).load(Ordering::Relaxed) };
 
-                // Write barrier: track tenured → nursery references.
-                if obj.generation == Generation::Tenured && (src_bits & QNAN) == QNAN
-                    && let Some(src_oid) = Value::from_bits(src_bits).as_obj_id() {
+                    let index = if (index_bits & QNAN) != QNAN {
+                        f64::from_bits(index_bits) as usize
+                    } else {
+                        Value::from_bits(index_bits)
+                            .as_number()
+                            .map(|n| n as usize)
+                            .ok_or_else(|| {
+                                JitError::runtime(
+                                    "List index must be a number",
+                                    loc.line as usize,
+                                    loc.col as usize,
+                                )
+                            })?
+                    };
+
+                    let oid = list_val.as_obj_id().ok_or_else(|| {
+                        JitError::runtime(
+                            "Expected list for indexing",
+                            loc.line as usize,
+                            loc.col as usize,
+                        )
+                    })?;
+                    let heap = ctx.heap.objects.read();
+                    let obj = heap
+                        .get(oid as usize)
+                        .and_then(|o| o.as_ref())
+                        .ok_or_else(|| {
+                            JitError::runtime(
+                                "Expected list for indexing",
+                                loc.line as usize,
+                                loc.col as usize,
+                            )
+                        })?;
+                    let ManagedObject::List(elements) = &obj.obj else {
+                        return Err(JitError::runtime(
+                            "Expected list for indexing",
+                            loc.line as usize,
+                            loc.col as usize,
+                        ));
+                    };
+
+                    // Grow the list if needed (double-checked to avoid data race).
+                    if elements.read().len() <= index {
+                        let mut write = elements.write();
+                        if write.len() <= index {
+                            write.resize_with(index + 1, Default::default);
+                        }
+                        write[index].store(src_bits, Ordering::Relaxed);
+                    } else {
+                        elements.read()[index].store(src_bits, Ordering::Relaxed);
+                    }
+
+                    // Write barrier: track tenured → nursery references.
+                    if obj.generation == Generation::Tenured
+                        && (src_bits & QNAN) == QNAN
+                        && let Some(src_oid) = Value::from_bits(src_bits).as_obj_id()
+                    {
                         let heap2 = ctx.heap.objects.read();
                         if let Some(Some(src_obj)) = heap2.get(src_oid as usize)
-                            && src_obj.generation == Generation::Nursery {
-                                ctx.heap.metadata.lock().unwrap().remembered_set.insert(oid);
-                            }
+                            && src_obj.generation == Generation::Nursery
+                        {
+                            ctx.heap.metadata.lock().remembered_set.insert(oid);
+                        }
                     }
-                frame.pc += 1;
-            }
-
-            // --- Objects ---
-            Instruction::NewObject { dst, capacity } => {
-                let frame = &mut frames[frame_idx];
-                let fields =
-                    rustc_hash::FxHashMap::with_capacity_and_hasher(capacity, Default::default());
-                ctx.alloc(ManagedObject::Object(RwLock::new(fields)), unsafe {
-                    frame.registers.get_unchecked(dst)
-                });
-                frame.pc += 1;
-            }
-            Instruction::ObjectGet {
-                dst,
-                obj,
-                name_id,
-                loc,
-            } => {
-                let frame = &mut frames[frame_idx];
-                let obj_val = load_register(&frame.registers, obj);
-
-                enum GetResult {
-                    Val(Value),
-                    Method(Value, u32),
-                    Error(&'static str),
+                    frame.pc += 1;
                 }
 
-                let get_result = if let Some(oid) = obj_val.as_obj_id() {
-                    let heap = ctx.heap.objects.read();
-                    if let Some(Some(obj_ref)) = heap.get(oid as usize) {
-                        match &obj_ref.obj {
-                            ManagedObject::Object(fields) => {
-                                let fields = fields.read();
-                                let val = fields
-                                    .get(&name_id)
-                                    .map(|s| Value::from_bits(s.load(Ordering::Relaxed)))
-                                    .unwrap_or_else(|| Value::from_bits(0));
-                                GetResult::Val(val)
-                            }
-                            ManagedObject::Timestamp(start) => {
-                                let val = if pool_name(&ctx, name_id) == "elapsed" {
-                                    Value::number(start.elapsed().as_secs_f64())
-                                } else {
-                                    Value::from_bits(0)
-                                };
-                                GetResult::Val(val)
-                            }
-                            ManagedObject::List(_) => {
-                                if pool_name(&ctx, name_id) == "pad" {
-                                    GetResult::Method(obj_val, name_id)
-                                } else {
-                                    GetResult::Val(Value::from_bits(0))
+                // --- Objects ---
+                Instruction::NewObject { dst, capacity } => {
+                    let frame = &mut frames[frame_idx];
+                    let fields = rustc_hash::FxHashMap::with_capacity_and_hasher(
+                        capacity,
+                        Default::default(),
+                    );
+                    ctx.alloc(ManagedObject::Object(RwLock::new(fields)), unsafe {
+                        frame.registers.get_unchecked(dst)
+                    });
+                    frame.pc += 1;
+                }
+                Instruction::ObjectGet {
+                    dst,
+                    obj,
+                    name_id,
+                    loc,
+                } => {
+                    let frame = &mut frames[frame_idx];
+                    let obj_val = load_register(&frame.registers, obj);
+
+                    enum GetResult {
+                        Val(Value),
+                        Method(Value, u32),
+                        Error(&'static str),
+                    }
+
+                    let get_result = if let Some(oid) = obj_val.as_obj_id() {
+                        let heap = ctx.heap.objects.read();
+                        if let Some(Some(obj_ref)) = heap.get(oid as usize) {
+                            match &obj_ref.obj {
+                                ManagedObject::Object(fields) => {
+                                    let fields = fields.read();
+                                    let val = fields
+                                        .get(&name_id)
+                                        .map(|s| Value::from_bits(s.load(Ordering::Relaxed)))
+                                        .unwrap_or_else(|| Value::from_bits(0));
+                                    GetResult::Val(val)
                                 }
-                            }
-                            ManagedObject::Range { start, end, .. } => {
-                                
-                                match pool_name(&ctx, name_id) {
-                                    "start" => GetResult::Val(Value::number(*start)),
-                                    "end" => GetResult::Val(Value::number(*end)),
-                                    "step" => GetResult::Method(obj_val, name_id),
-                                    _ => GetResult::Val(Value::from_bits(0)),
+                                ManagedObject::Timestamp(start) => {
+                                    let val = if pool_name(&ctx, name_id) == "elapsed" {
+                                        Value::number(start.elapsed().as_secs_f64())
+                                    } else {
+                                        Value::from_bits(0)
+                                    };
+                                    GetResult::Val(val)
                                 }
+                                ManagedObject::List(_) => {
+                                    if pool_name(&ctx, name_id) == "pad" {
+                                        GetResult::Method(obj_val, name_id)
+                                    } else {
+                                        GetResult::Val(Value::from_bits(0))
+                                    }
+                                }
+                                ManagedObject::Range { start, end, .. } => {
+                                    match pool_name(&ctx, name_id) {
+                                        "start" => GetResult::Val(Value::number(*start)),
+                                        "end" => GetResult::Val(Value::number(*end)),
+                                        "step" => GetResult::Method(obj_val, name_id),
+                                        _ => GetResult::Val(Value::from_bits(0)),
+                                    }
+                                }
+                                _ => GetResult::Error("Expected object for property access"),
                             }
-                            _ => GetResult::Error("Expected object for property access"),
+                        } else {
+                            GetResult::Error("Expected object for property access")
                         }
                     } else {
                         GetResult::Error("Expected object for property access")
-                    }
-                } else {
-                    GetResult::Error("Expected object for property access")
-                };
+                    };
 
-                match get_result {
-                    GetResult::Val(v) => store_register(&frame.registers, dst, v),
-                    GetResult::Method(recv, nid) => {
-                        let temp = AtomicU64::new(0);
-                        ctx.alloc(
-                            ManagedObject::BoundMethod {
-                                receiver: recv,
-                                name_id: nid,
-                            },
-                            &temp,
-                        );
-                        store_register(
-                            &frame.registers,
-                            dst,
-                            Value::from_bits(temp.load(Ordering::Relaxed)),
-                        );
+                    match get_result {
+                        GetResult::Val(v) => store_register(&frame.registers, dst, v),
+                        GetResult::Method(recv, nid) => {
+                            let temp = AtomicU64::new(0);
+                            ctx.alloc(
+                                ManagedObject::BoundMethod {
+                                    receiver: recv,
+                                    name_id: nid,
+                                },
+                                &temp,
+                            );
+                            store_register(
+                                &frame.registers,
+                                dst,
+                                Value::from_bits(temp.load(Ordering::Relaxed)),
+                            );
+                        }
+                        GetResult::Error(msg) => {
+                            return Err(JitError::runtime(
+                                msg,
+                                loc.line as usize,
+                                loc.col as usize,
+                            ));
+                        }
                     }
-                    GetResult::Error(msg) => {
-                        return Err(JitError::runtime(msg, loc.line as usize, loc.col as usize));
-                    }
+                    frame.pc += 1;
                 }
-                frame.pc += 1;
-            }
-            Instruction::ObjectSet {
-                obj,
-                name_id,
-                src,
-                loc,
-            } => {
-                let frame = &mut frames[frame_idx];
-                let obj_bits = unsafe { frame.registers.get_unchecked(obj).load(Ordering::Relaxed) };
-                let src_bits = unsafe { frame.registers.get_unchecked(src).load(Ordering::Relaxed) };
-                let obj_val = Value::from_bits(obj_bits);
+                Instruction::ObjectSet {
+                    obj,
+                    name_id,
+                    src,
+                    loc,
+                } => {
+                    let frame = &mut frames[frame_idx];
+                    let obj_bits =
+                        unsafe { frame.registers.get_unchecked(obj).load(Ordering::Relaxed) };
+                    let src_bits =
+                        unsafe { frame.registers.get_unchecked(src).load(Ordering::Relaxed) };
+                    let obj_val = Value::from_bits(obj_bits);
 
-                let oid = obj_val.as_obj_id().ok_or_else(|| {
-                    JitError::runtime(
-                        "Expected object for property assignment",
-                        loc.line as usize,
-                        loc.col as usize,
-                    )
-                })?;
-                let heap = ctx.heap.objects.read();
-                let obj_ref = heap
-                    .get(oid as usize)
-                    .and_then(|o| o.as_ref())
-                    .ok_or_else(|| {
+                    let oid = obj_val.as_obj_id().ok_or_else(|| {
                         JitError::runtime(
                             "Expected object for property assignment",
                             loc.line as usize,
                             loc.col as usize,
                         )
                     })?;
-                let ManagedObject::Object(fields) = &obj_ref.obj else {
-                    return Err(JitError::runtime(
-                        "Expected object for property assignment",
-                        loc.line as usize,
-                        loc.col as usize,
-                    ));
-                };
+                    let heap = ctx.heap.objects.read();
+                    let obj_ref =
+                        heap.get(oid as usize)
+                            .and_then(|o| o.as_ref())
+                            .ok_or_else(|| {
+                                JitError::runtime(
+                                    "Expected object for property assignment",
+                                    loc.line as usize,
+                                    loc.col as usize,
+                                )
+                            })?;
+                    let ManagedObject::Object(fields) = &obj_ref.obj else {
+                        return Err(JitError::runtime(
+                            "Expected object for property assignment",
+                            loc.line as usize,
+                            loc.col as usize,
+                        ));
+                    };
 
-                // Insert or update field (prefer read-lock update when slot exists).
-                {
-                    let fields_read = fields.read();
-                    if let Some(slot) = fields_read.get(&name_id) {
-                        slot.store(src_bits, Ordering::Relaxed);
-                    } else {
-                        drop(fields_read);
-                        fields.write().insert(name_id, AtomicU64::new(src_bits));
+                    // Insert or update field (prefer read-lock update when slot exists).
+                    {
+                        let fields_read = fields.read();
+                        if let Some(slot) = fields_read.get(&name_id) {
+                            slot.store(src_bits, Ordering::Relaxed);
+                        } else {
+                            drop(fields_read);
+                            fields.write().insert(name_id, AtomicU64::new(src_bits));
+                        }
                     }
-                }
 
-                // Write barrier.
-                if obj_ref.generation == Generation::Tenured && (src_bits & QNAN) == QNAN
-                    && let Some(src_oid) = Value::from_bits(src_bits).as_obj_id()
+                    // Write barrier.
+                    if obj_ref.generation == Generation::Tenured
+                        && (src_bits & QNAN) == QNAN
+                        && let Some(src_oid) = Value::from_bits(src_bits).as_obj_id()
                         && let Some(Some(src_obj)) = heap.get(src_oid as usize)
-                            && src_obj.generation == Generation::Nursery {
-                                ctx.heap.metadata.lock().unwrap().remembered_set.insert(oid);
-                            }
-                frame.pc += 1;
-            }
-
-            // --- Concurrency ---
-            Instruction::Spawn(box_data) => {
-                let crate::compiler::SpawnData {
-                    instructions: t_instrs,
-                    locals_count,
-                    captures,
-                } = *box_data;
-                let body = t_instrs;
-                let s_ctx = ctx.clone();
-
-                let t_regs: Vec<AtomicU64> =
-                    (0..locals_count).map(|_| AtomicU64::new(0)).collect();
-                let parent_registers = Arc::clone(&frames[frame_idx].registers);
-                for &reg in captures.iter() {
-                    let bits = unsafe { parent_registers.get_unchecked(reg).load(Ordering::Relaxed) };
-                    t_regs[reg].store(bits, Ordering::Relaxed);
+                        && src_obj.generation == Generation::Nursery
+                    {
+                        ctx.heap.metadata.lock().remembered_set.insert(oid);
+                    }
+                    frame.pc += 1;
                 }
-                let thread_regs: Arc<[AtomicU64]> = Arc::from(t_regs);
 
-                join_set.spawn(async move {
-                    let mut js = JoinSet::new();
-                    let t_roots = Arc::new(Mutex::new(Vec::with_capacity(16)));
-                    s_ctx.active_registers.lock().unwrap().push(t_roots.clone());
+                // --- Concurrency ---
+                Instruction::Spawn(box_data) => {
+                    let crate::compiler::SpawnData {
+                        instructions: t_instrs,
+                        locals_count,
+                        captures,
+                    } = *box_data;
+                    let body = t_instrs;
+                    let s_ctx = ctx.clone();
 
-                    let res =
-                        execute_bytecode(&body.clone(), s_ctx, &mut js, thread_regs, None, t_roots)
-                            .await;
-                    drain_join_set(&mut js).await?;
-                    res.map(|_| ())
-                });
-                frames[frame_idx].pc += 1;
+                    let t_regs: Vec<AtomicU64> =
+                        (0..locals_count).map(|_| AtomicU64::new(0)).collect();
+                    let parent_registers = Arc::clone(&frames[frame_idx].registers);
+                    for &reg in captures.iter() {
+                        let bits =
+                            unsafe { parent_registers.get_unchecked(reg).load(Ordering::Relaxed) };
+                        t_regs[reg].store(bits, Ordering::Relaxed);
+                    }
+                    let thread_regs: Arc<[AtomicU64]> = Arc::from(t_regs);
+
+                    join_set.spawn(async move {
+                        let mut js = JoinSet::new();
+                        let t_roots = Arc::new(Mutex::new(Vec::with_capacity(16)));
+                        s_ctx.active_registers.lock().push(t_roots.clone());
+
+                        let res = execute_bytecode(
+                            &body.clone(),
+                            s_ctx,
+                            &mut js,
+                            thread_regs,
+                            None,
+                            t_roots,
+                        )
+                        .await;
+                        drain_join_set(&mut js).await?;
+                        res.map(|_| ())
+                    });
+                    frames[frame_idx].pc += 1;
+                }
+            }
+
+            if instr_count & 0x3FFF == 0 {
+                tokio::task::yield_now().await;
             }
         }
-
-        if instr_count & 0x3FFF == 0 {
-            tokio::task::yield_now().await;
-        }
-    }
     })
 }
 
@@ -1429,7 +1468,6 @@ pub fn setup_native_fns(fns: &mut rustc_hash::FxHashMap<String, NativeFn>) {
                                 let t_roots = Arc::new(Mutex::new(Vec::with_capacity(16)));
                                 ctx.active_registers
                                     .lock()
-                                    .unwrap()
                                     .push(t_roots.clone());
 
                                 match execute_bytecode(
