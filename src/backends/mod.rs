@@ -1,3 +1,19 @@
+//! Execution backends and runtime structures.
+//!
+//! This module defines the [`Backend`] trait, which abstracts over different
+//! runtime execution strategies (e.g. tree-walk, bytecode virtual machine, or
+//! in the future, native compilation).  Currently, the only implementation is
+//! [`interpreter::Interpreter`], a fast, register-based async bytecode VM.
+//!
+//! # Memory management
+//!
+//! Unboxed values (numbers, booleans, SSO strings) are passed directly in registers,
+//! while complex items (lists, objects, long strings) are allocated into the
+//! [`Heap`].  The heap features:
+//! - Thread-safe `AtomicU64` slots for lock-free parallel data races
+//! - A nursery and tenured generation with write barriers ([`Generation`])
+//! - A parallel mark-and-sweep garbage collector
+
 use crate::compiler::{Loc, Program, Value};
 use crate::error::JitError;
 use std::future::Future;

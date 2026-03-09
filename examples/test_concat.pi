@@ -1,11 +1,11 @@
-le a: "Hello, "
-le b: "World!"
-le c: a + b
+let a: "Hello, "
+let b: "World!"
+let c: a + b
 print(c)
 
-le s1: "Small"
-le s2: "JIT"
-le s3: s1 + " " + s2
+let s1: "Small"
+let s2: "JIT"
+let s3: s1 + " " + s2
 print(s3)
 
 if s3 == "Small JIT" {
@@ -15,7 +15,7 @@ if s3 == "Small JIT" {
 }
 
 // Global concat
-el g1: "Base"
+mut g1: "Base"
 fn append_to_g(suffix) {
     g1: g1 + suffix
 }

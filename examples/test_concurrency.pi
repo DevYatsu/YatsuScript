@@ -1,6 +1,6 @@
 fn check(id) {
-    el x: 0
-    el i: 0
+    mut x: 0
+    mut i: 0
     while i < 1000 {
         x: x + 1
         i: i + 1
@@ -12,7 +12,7 @@ fn check(id) {
     }
 }
 
-el t: 0
+mut t: 0
 while t < 10 {
     spawn {
         check(t)

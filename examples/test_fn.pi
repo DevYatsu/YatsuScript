@@ -2,7 +2,7 @@ fn add(a, b) {
     return a + b
 }
 
-le res: add(10, 20)
+let res: add(10, 20)
 print("10 + 20 =", res)
 
 fn fib(n) {

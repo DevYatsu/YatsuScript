@@ -1,11 +1,11 @@
-le x: {
-    a: {b: 3, c: 4},
+let x: {
+    a: { b: 3, c: 4 },
     b: 2
 }
 
 print(x.a.c)
 
-le y: {
+let y: {
     a: {
         b: 3,
         c: 4

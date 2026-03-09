@@ -1,3 +1,9 @@
+//! Definitions for the Pi bytecode compile-time structures.
+//!
+//! This module defines the [`Value`] type (a NaN-boxed 64-bit word that
+//! represents all runtime values), the [`Instruction`] set for the register-based
+//! virtual machine, and the root [`Program`] that is emitted by the parser.
+
 use std::sync::Arc;
 
 use crate::backends::{Context, ManagedObject};
@@ -137,7 +143,7 @@ pub enum Instruction {
     LoadLiteral { dst: usize, val: Value },
     /// Copy a value from one register to another.
     Move { dst: usize, src: usize },
-    /// Load a value from a global variable into a register.
+    /// Load a value from a global variablet into a register.
     LoadGlobal { dst: usize, global: usize },
     /// Store a value from a register into a global variable.
     StoreGlobal { global: usize, src: usize },
@@ -175,7 +181,7 @@ pub enum Instruction {
     },
     /// Atomic increment of a local register (expected to contain a number).
     Increment(usize),
-    /// Atomic increment of a global variable (expected to contain a number).
+    /// Atomic increment of a global variablet (expected to contain a number).
     IncrementGlobal(usize),
     /// Compare two values for equality.
     Eq { dst: usize, lhs: usize, rhs: usize },
@@ -284,7 +290,7 @@ pub struct UserFunction {
     pub params_count: usize,
 }
 
-/// The complete compiled program ready for execution.
+/// The complet e compiled program ready for execution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     /// Entry point bytecode.

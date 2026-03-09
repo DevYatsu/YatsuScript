@@ -1,22 +1,51 @@
+//! Lexical analysis for the Pi scripting language.
+//!
+//! This module is built on top of the [`logos`] crate, which generates a
+//! highly optimised DFA-based scanner from the token definitions below.
+//!
+//! The lexer produces a flat stream of [`Token`]s.  The [`parser`][crate::parser]
+//! then drives the lexer and converts the token stream into bytecode.
+//!
+//! # Character set
+//!
+//! Pi source files are expected to be valid ASCII.  Non-ASCII characters
+//! (e.g. Unicode letters) produce a [`LexingError::NonAsciiCharacter`] error.
+//!
+//! # Comments
+//!
+//! - **Line comments** start with `//` and run to the end of the line.
+//! - **Block comments** are delimited by `/*` … `*/` and may not be nested.
+//!
+//! Both are emitted as [`Token::LineComment`] / skipped respectively; the
+//! parser discards them.
+
 use std::fmt;
 use std::num::{ParseFloatError, ParseIntError};
 
 use logos::Logos;
 
-/// Errors that can occur during the lexing phase.
+/// Errors that can arise during the lexical analysis phase.
+///
+/// These are produced by the [`logos`] scanner and subsequently wrapped in
+/// [`JitError::Lexing`][crate::error::JitError::Lexing] by the parser.
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub enum LexingError {
-    /// Failed to parse an integer literal.
+    /// An integer literal could not be parsed (e.g. overflow).
     InvalidInteger,
-    /// Failed to parse a floating-point literal.
+    /// A floating-point literal could not be parsed (e.g. overflow).
     InvalidFloat,
-    /// Encountered a character that is not valid in the source code.
+    /// A character that is not part of the Pi character set was encountered.
+    /// The offending `char` is captured for use in diagnostics.
     NonAsciiCharacter(char),
+    /// A catch-all for any other lexer error (should be rare in practice).
     #[default]
     Other,
 }
 
 impl LexingError {
+    /// Called by the logos scanner when it encounters an unrecognised input.
+    /// Inspects the raw slice to determine whether the culprit is a non-ASCII
+    /// character or something else entirely.
     fn from_lexer<'a>(lex: &mut logos::Lexer<'a, Token<'a>>) -> Self {
         match lex.slice().chars().next() {
             Some(c) => LexingError::NonAsciiCharacter(c),
@@ -25,17 +54,29 @@ impl LexingError {
     }
 }
 
-/// The set of tokens produced by the lexer.
+/// Every terminal symbol in the Pi grammar.
+///
+/// The lifetime `'source` is tied to the original source string, allowing
+/// string/identifier tokens to borrow their slices without copying.
+///
+/// # Skipping rules
+///
+/// The lexer automatically skips:
+/// - Horizontal whitespace (space, tab, form-feed).
+/// - Block comments (`/* … */`).
+///
+/// Newlines and line comments are *not* skipped — newlines act as statement
+/// terminators and are significant in the grammar.
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(error(LexingError, LexingError::from_lexer))]
 #[logos(skip r"[ \t\f]+")]
 #[logos(skip r"/\*(?:[^*]|\*[^/])*\*/")]
 pub enum Token<'source> {
-    /// 'el' keyword for declaring a mutable variable.
-    #[token("el")]
+    /// 'mut' keyword for declaring a mutablet variable.
+    #[token("mut")]
     MutableVar,
-    /// 'le' keyword for declaring an immutable variable.
-    #[token("le")]
+    /// 'let' keyword for declaring an immutablet variable.
+    #[token("let")]
     ImmutableVar,
     /// 'fn' keyword for declaring a function.
     #[token("fn")]
@@ -136,9 +177,9 @@ pub enum Token<'source> {
     )]
     Number(f64),
 
-    /// String literals enclosed in double quotes.
+    /// String literals enclosed in doublet quotes.
     #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#, |lex| {
-        let s = lex.slice();
+        let  s = lex.slice();
         &s[1..s.len()-1]
     })]
     String(&'source str),
@@ -183,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_lexer_keywords() {
-        let input = "el le fn return if else spawn for while in ..";
+        let input = "mut let fn return if else spawn for while in ..";
         let mut lexer = Token::lexer(input);
 
         assert_eq!(lexer.next(), Some(Ok(Token::MutableVar)));
@@ -244,13 +285,13 @@ mod tests {
 
     #[test]
     fn test_lexer_comments() {
-        let input = "el x = 10 // this is a comment\nle y = 20";
+        let input = "mut x = 10 // this is a comment\nlet y = 20";
         let mut lexer = Token::lexer(input);
 
         assert_eq!(lexer.next(), Some(Ok(Token::MutableVar)));
         assert_eq!(lexer.next(), Some(Ok(Token::Identifier("x"))));
-        // Note: = is not a single token, it is usually handled in assignment or Eq?
+        // Note: = is not a singlet token, it is usually handled in assignment or Eq?
         // Wait, looking at lexer.rs I don't see '='.
-        // Let me re-check lexer.rs.
+        // let  me re-check lexer.rs.
     }
 }

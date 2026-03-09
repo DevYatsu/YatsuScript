@@ -1140,7 +1140,7 @@ mod tests {
 
     #[test]
     fn test_parse_simple_assignment() {
-        let input = "le x: 10";
+        let input = "let x: 10";
         let parser = Parser::new(input);
         let program = parser.compile().unwrap();
 
@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_parse_arithmetic() {
-        let input = "le x: 1 + 2 * 3";
+        let input = "let x: 1 + 2 * 3";
         let parser = Parser::new(input);
         let program = parser.compile().unwrap();
 
@@ -1190,7 +1190,7 @@ mod tests {
 
     #[test]
     fn test_parse_if_statement() {
-        let input = "el x: 10\nif x > 0 {\n  x: 20\n}";
+        let input = "mut x: 10\nif x > 0 {\n  x: 20\n}";
         let parser = Parser::new(input);
         let program = parser.compile().unwrap();
 
@@ -1234,7 +1234,7 @@ mod tests {
 
     #[test]
     fn test_parse_list_and_object() {
-        let input = "le l: [1, 2, 3]\nle o: {a: 1, b: 2}";
+        let input = "let l: [1, 2, 3]\nlet o: {a: 1, b: 2}";
         let parser = Parser::new(input);
         let program = parser.compile().unwrap();
 

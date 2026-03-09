@@ -1,8 +1,8 @@
 print("--- Extensible API Demo ---")
 
-le time_start: time()
+let time_start: time()
 
-spawn { 
+spawn {
     print "Task 1: Concurrent print"
 }
 
@@ -10,7 +10,7 @@ spawn {
     print("Task 2: Parenthesized print")
 }
 
-le my_list: [1, 2, 3]
+let my_list:[1, 2, 3]
 print("My list:", my_list)
 
-print ("Done in", (time() - time_start) * 1_000_000, "microseconds")
+print("Done in",(time() - time_start) * 1_000_000, "microseconds")
