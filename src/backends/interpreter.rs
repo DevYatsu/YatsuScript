@@ -22,7 +22,6 @@ impl Backend for Interpreter {
         Box::pin(async move { run_interpreter(program).await })
     }
 }
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -56,6 +55,32 @@ fn pool_name(ctx: &Context, name_id: u32) -> &str {
         .get(name_id as usize)
         .map(|s| s.as_ref())
         .unwrap_or("")
+}
+
+#[inline(always)]
+fn load_register(regs: &[AtomicU64], index: usize) -> Value {
+    Value::from_bits(unsafe { regs.get_unchecked(index).load(Ordering::Relaxed) })
+}
+
+#[inline(always)]
+fn store_register(regs: &[AtomicU64], index: usize, val: Value) {
+    unsafe {
+        regs.get_unchecked(index)
+            .store(val.to_bits(), Ordering::Relaxed)
+    };
+}
+
+#[derive(Clone)]
+struct ReturnTarget {
+    registers: Arc<[AtomicU64]>,
+    dst: usize,
+}
+
+struct CallFrame {
+    instructions: Arc<[Instruction]>,
+    registers: Arc<[AtomicU64]>,
+    pc: usize,
+    return_to: Option<ReturnTarget>,
 }
 
 // ---------------------------------------------------------------------------
@@ -175,55 +200,49 @@ async fn drain_join_set(join_set: &mut JoinSet<Result<(), JitError>>) -> Result<
 /// # GC Integration
 /// Registers must be registered with the `task_roots` to ensure the garbage
 /// collector can trace and protect live objects during collection cycles.
-#[async_recursion::async_recursion]
-pub async fn execute_bytecode(
-    instructions: &Arc<[Instruction]>,
+pub fn execute_bytecode<'a>(
+    instructions: &'a Arc<[Instruction]>,
     ctx: Arc<Context>,
-    join_set: &mut JoinSet<Result<(), JitError>>,
+    join_set: &'a mut JoinSet<Result<(), JitError>>,
     registers: Arc<[AtomicU64]>,
-    dst_reg: Option<&AtomicU64>,
+    dst_reg: Option<&'a AtomicU64>,
     task_roots: Arc<Mutex<Vec<Arc<[AtomicU64]>>>>,
-) -> Result<Value, JitError> {
-    // Register the current local register set for GC tracing.
-    task_roots.lock().unwrap().push(registers.clone());
-
-    // RAII guard: de-register when this scope exits.
-    struct RegGuard(Arc<Mutex<Vec<Arc<[AtomicU64]>>>>);
+) -> Pin<Box<dyn Future<Output = Result<Value, JitError>> + Send + 'a>> {
+    Box::pin(async move {
+    // RAII guard: restore the task root stack on exit.
+    struct RegGuard {
+        task_roots: Arc<Mutex<Vec<Arc<[AtomicU64]>>>>,
+        initial_len: usize,
+    }
     impl Drop for RegGuard {
         fn drop(&mut self) {
-            self.0.lock().unwrap().pop();
+            self.task_roots.lock().unwrap().truncate(self.initial_len);
         }
     }
-    let _guard = RegGuard(task_roots.clone());
-
-    // --- Internal VM register helpers ---
-
-    #[inline(always)]
-    fn load(regs: &[AtomicU64], index: usize) -> Value {
-        Value::from_bits(unsafe { regs.get_unchecked(index).load(Ordering::Relaxed) })
-    }
-
-    #[inline(always)]
-    fn store(regs: &[AtomicU64], index: usize, val: Value) {
-        unsafe {
-            regs.get_unchecked(index)
-                .store(val.to_bits(), Ordering::Relaxed)
-        };
-    }
+    let initial_root_len = {
+        let mut roots = task_roots.lock().unwrap();
+        let initial_len = roots.len();
+        roots.push(registers.clone());
+        initial_len
+    };
+    let _guard = RegGuard {
+        task_roots: task_roots.clone(),
+        initial_len: initial_root_len,
+    };
 
     // Numeric binary operation with fast-path for plain f64 bits.
     macro_rules! binary_op {
-        ($dst:expr, $lhs:expr, $rhs:expr, $op:tt, $loc:expr) => {{
-            let l_bits = unsafe { registers.get_unchecked(*$lhs).load(Ordering::Relaxed) };
-            let r_bits = unsafe { registers.get_unchecked(*$rhs).load(Ordering::Relaxed) };
+        ($regs:expr, $dst:expr, $lhs:expr, $rhs:expr, $op:tt, $loc:expr) => {{
+            let l_bits = unsafe { $regs.get_unchecked($lhs).load(Ordering::Relaxed) };
+            let r_bits = unsafe { $regs.get_unchecked($rhs).load(Ordering::Relaxed) };
 
             if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
-                store(&registers, *$dst, Value::number(f64::from_bits(l_bits) $op f64::from_bits(r_bits)));
+                store_register($regs, $dst, Value::number(f64::from_bits(l_bits) $op f64::from_bits(r_bits)));
             } else {
                 let l = Value::from_bits(l_bits);
                 let r = Value::from_bits(r_bits);
                 if let (Some(lv), Some(rv)) = (l.as_number(), r.as_number()) {
-                    store(&registers, *$dst, Value::number(lv $op rv));
+                    store_register($regs, $dst, Value::number(lv $op rv));
                 } else {
                     return Err(JitError::runtime(
                         format!("Math error: expected numbers for '{}'", stringify!($op)),
@@ -237,9 +256,9 @@ pub async fn execute_bytecode(
 
     // Numeric comparison with fast-path for plain f64 bits.
     macro_rules! compare_op {
-        ($dst:expr, $lhs:expr, $rhs:expr, $op:tt, $loc:expr) => {{
-            let l_bits = unsafe { registers.get_unchecked(*$lhs).load(Ordering::Relaxed) };
-            let r_bits = unsafe { registers.get_unchecked(*$rhs).load(Ordering::Relaxed) };
+        ($regs:expr, $dst:expr, $lhs:expr, $rhs:expr, $op:tt, $loc:expr) => {{
+            let l_bits = unsafe { $regs.get_unchecked($lhs).load(Ordering::Relaxed) };
+            let r_bits = unsafe { $regs.get_unchecked($rhs).load(Ordering::Relaxed) };
 
             let result = if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
                 Some(f64::from_bits(l_bits) $op f64::from_bits(r_bits))
@@ -254,7 +273,7 @@ pub async fn execute_bytecode(
             };
 
             match result {
-                Some(b) => store(&registers, *$dst, Value::bool(b)),
+                Some(b) => store_register($regs, $dst, Value::bool(b)),
                 None => return Err(JitError::runtime(
                     format!("Compare error: expected numbers for '{}'", stringify!($op)),
                     $loc.line as usize,
@@ -290,32 +309,6 @@ pub async fn execute_bytecode(
         }};
     }
 
-    // Invoke a `Callable` (either native or user) and optionally store the result.
-    macro_rules! dispatch_call {
-        ($callable:expr, $args_vals:expr, $dst:expr, $loc:expr) => {{
-            match $callable {
-                Callable::Native(native_fn) => {
-                    let res = native_fn(ctx.clone(), $args_vals, $loc).await?;
-                    if let Some(dst_idx) = $dst {
-                        store(&registers, dst_idx, res);
-                    }
-                }
-                Callable::User(func) => {
-                    let f_regs = build_call_registers(func.locals_count, &$args_vals);
-                    let _ = execute_bytecode(
-                        &func.instructions,
-                        ctx.clone(),
-                        join_set,
-                        f_regs,
-                        ($dst).map(|r| unsafe { registers.get_unchecked(r) }),
-                        task_roots.clone(),
-                    )
-                    .await?;
-                }
-            }
-        }};
-    }
-
     // Equality check shared by `Eq` and `Ne`.
     #[inline(always)]
     fn values_equal_fast(ctx: &Context, l_bits: u64, r_bits: u64) -> bool {
@@ -326,31 +319,73 @@ pub async fn execute_bytecode(
         }
     }
 
-    let mut pc = 0usize;
     let mut instr_count: u32 = 0;
+    let mut frames = vec![CallFrame {
+        instructions: Arc::clone(instructions),
+        registers: registers.clone(),
+        pc: 0,
+        return_to: None,
+    }];
 
-    // --- Main Dispatch Loop ---
-    while pc < instructions.len() {
-        let instr = unsafe { instructions.get_unchecked(pc) };
+    // Main Dispatch Loop
+    loop {
+        if frames.is_empty() {
+            return Ok(Value::from_bits(0));
+        }
         instr_count = instr_count.wrapping_add(1);
+
+        let frame_idx = frames.len() - 1;
+        let implicit_return = {
+            let frame = &frames[frame_idx];
+            frame.pc >= frame.instructions.len()
+        };
+
+        if implicit_return {
+            let frame = frames.pop().unwrap();
+            let ret_val = Value::from_bits(0);
+            task_roots.lock().unwrap().pop();
+            if let Some(target) = frame.return_to {
+                store_register(&target.registers, target.dst, ret_val);
+                continue;
+            }
+            if let Some(dst) = dst_reg {
+                dst.store(ret_val.to_bits(), Ordering::Relaxed);
+            }
+            return Ok(ret_val);
+        }
+
+        let instr = {
+            let frame = &frames[frame_idx];
+            unsafe { frame.instructions.get_unchecked(frame.pc).clone() }
+        };
 
         match instr {
             Instruction::LoadLiteral { dst, val } => {
-                store(&registers, *dst, *val);
+                let frame = &mut frames[frame_idx];
+                store_register(&frame.registers, dst, val);
+                frame.pc += 1;
             }
             Instruction::Move { dst, src } => {
-                store(&registers, *dst, load(&registers, *src));
+                let frame = &mut frames[frame_idx];
+                let val = load_register(&frame.registers, src);
+                store_register(&frame.registers, dst, val);
+                frame.pc += 1;
             }
             Instruction::LoadGlobal { dst, global } => {
-                store(&registers, *dst, load(&ctx.globals, *global));
+                let frame = &mut frames[frame_idx];
+                let val = load_register(&ctx.globals, global);
+                store_register(&frame.registers, dst, val);
+                frame.pc += 1;
             }
             Instruction::StoreGlobal { global, src } => {
-                let val = load(&registers, *src);
+                let frame = &mut frames[frame_idx];
+                let val = load_register(&frame.registers, src);
                 unsafe {
                     ctx.globals
-                        .get_unchecked(*global)
+                        .get_unchecked(global)
                         .store(val.to_bits(), Ordering::Relaxed);
                 }
+                frame.pc += 1;
             }
 
             // --- Calls ---
@@ -360,9 +395,9 @@ pub async fn execute_bytecode(
                     args_regs,
                     dst,
                     loc,
-                } = &**box_data;
-                let callable = ctx.get_callable(*name_id).ok_or_else(|| {
-                    let name = unsafe { ctx.string_pool.get_unchecked(*name_id as usize) };
+                } = *box_data;
+                let callable = ctx.get_callable(name_id).cloned().ok_or_else(|| {
+                    let name = unsafe { ctx.string_pool.get_unchecked(name_id as usize) };
                     JitError::runtime(
                         format!("Unknown function: {}", name),
                         loc.line as usize,
@@ -371,7 +406,7 @@ pub async fn execute_bytecode(
                 })?;
 
                 // For user functions, verify arity before building registers.
-                if let Callable::User(func) = callable
+                if let Callable::User(func) = &callable
                     && args_regs.len() != func.params_count {
                         return Err(JitError::runtime(
                             format!(
@@ -384,8 +419,40 @@ pub async fn execute_bytecode(
                         ));
                     }
 
-                let args: Vec<Value> = args_regs.iter().map(|&r| load(&registers, r)).collect();
-                dispatch_call!(callable, args, dst.map(|r| r), *loc);
+                let args: Vec<Value> = {
+                    let frame = &frames[frame_idx];
+                    args_regs
+                        .iter()
+                        .map(|&r| load_register(&frame.registers, r))
+                        .collect()
+                };
+
+                match callable {
+                    Callable::Native(native_fn) => {
+                        let res = native_fn(ctx.clone(), args, loc).await?;
+                        let frame = &mut frames[frame_idx];
+                        if let Some(dst_idx) = dst {
+                            store_register(&frame.registers, dst_idx, res);
+                        }
+                        frame.pc += 1;
+                    }
+                    Callable::User(func) => {
+                        let return_to = dst.map(|dst_idx| ReturnTarget {
+                            registers: Arc::clone(&frames[frame_idx].registers),
+                            dst: dst_idx,
+                        });
+                        frames[frame_idx].pc += 1;
+
+                        let callee_regs = build_call_registers(func.locals_count, &args);
+                        task_roots.lock().unwrap().push(callee_regs.clone());
+                        frames.push(CallFrame {
+                            instructions: func.instructions,
+                            registers: callee_regs,
+                            pc: 0,
+                            return_to,
+                        });
+                    }
+                }
             }
 
             Instruction::CallDynamic(box_data) => {
@@ -394,9 +461,17 @@ pub async fn execute_bytecode(
                     args_regs,
                     dst,
                     loc,
-                } = &**box_data;
-                let callee_val = load(&registers, *callee_reg);
-                let args: Vec<Value> = args_regs.iter().map(|&r| load(&registers, r)).collect();
+                } = *box_data;
+                let (callee_val, args): (Value, Vec<Value>) = {
+                    let frame = &frames[frame_idx];
+                    (
+                        load_register(&frame.registers, callee_reg),
+                        args_regs
+                            .iter()
+                            .map(|&r| load_register(&frame.registers, r))
+                            .collect(),
+                    )
+                };
 
                 // Handle BoundMethod (e.g., range.step(...) or list.pad(...))
                 if let Some(oid) = callee_val.as_obj_id() {
@@ -427,7 +502,7 @@ pub async fn execute_bytecode(
                                             }
                                         }
                                 }
-                                pc += 1;
+                                frames[frame_idx].pc += 1;
                                 continue;
                             } else if method == "step"
                                 && let Some(r_oid) = receiver_val.as_obj_id() {
@@ -461,13 +536,10 @@ pub async fn execute_bytecode(
                                             &temp,
                                         );
                                         if let Some(dst_idx) = dst {
-                                            store(
-                                                &registers,
-                                                *dst_idx,
-                                                Value::from_bits(temp.load(Ordering::Relaxed)),
-                                            );
+                                            let frame = &mut frames[frame_idx];
+                                            store_register(&frame.registers, dst_idx, Value::from_bits(temp.load(Ordering::Relaxed)));
                                         }
-                                        pc += 1;
+                                        frames[frame_idx].pc += 1;
                                         continue;
                                     }
                                 }
@@ -488,7 +560,7 @@ pub async fn execute_bytecode(
                     )
                 })?;
 
-                let callable = ctx.get_callable(name_id).ok_or_else(|| {
+                let callable = ctx.get_callable(name_id).cloned().ok_or_else(|| {
                     JitError::runtime(
                         format!(
                             "Dynamic call: unknown function '{}'",
@@ -499,28 +571,73 @@ pub async fn execute_bytecode(
                     )
                 })?;
 
-                dispatch_call!(callable, args, dst.map(|r| r), *loc);
+                match callable {
+                    Callable::Native(native_fn) => {
+                        let res = native_fn(ctx.clone(), args, loc).await?;
+                        let frame = &mut frames[frame_idx];
+                        if let Some(dst_idx) = dst {
+                            store_register(&frame.registers, dst_idx, res);
+                        }
+                        frame.pc += 1;
+                    }
+                    Callable::User(func) => {
+                        if args_regs.len() != func.params_count {
+                            return Err(JitError::runtime(
+                                format!(
+                                    "Function arity mismatch: expected {}, got {}",
+                                    func.params_count,
+                                    args_regs.len()
+                                ),
+                                loc.line as usize,
+                                loc.col as usize,
+                            ));
+                        }
+
+                        let return_to = dst.map(|dst_idx| ReturnTarget {
+                            registers: Arc::clone(&frames[frame_idx].registers),
+                            dst: dst_idx,
+                        });
+                        frames[frame_idx].pc += 1;
+
+                        let callee_regs = build_call_registers(func.locals_count, &args);
+                        task_roots.lock().unwrap().push(callee_regs.clone());
+                        frames.push(CallFrame {
+                            instructions: func.instructions,
+                            registers: callee_regs,
+                            pc: 0,
+                            return_to,
+                        });
+                    }
+                }
             }
 
             // --- Control flow ---
             Instruction::Return(val_reg) => {
-                let val = val_reg
-                    .map(|r| load(&registers, r))
+                let ret_val = val_reg
+                    .map(|r| load_register(&frames[frame_idx].registers, r))
                     .unwrap_or_else(|| Value::from_bits(0));
-                if let Some(dst) = dst_reg {
-                    dst.store(val.to_bits(), Ordering::Relaxed);
+                let frame = frames.pop().unwrap();
+                task_roots.lock().unwrap().pop();
+                if let Some(target) = frame.return_to {
+                    store_register(&target.registers, target.dst, ret_val);
+                    continue;
                 }
-                return Ok(val);
+                if let Some(dst) = dst_reg {
+                    dst.store(ret_val.to_bits(), Ordering::Relaxed);
+                }
+                return Ok(ret_val);
             }
             Instruction::Jump(target) => {
-                pc = *target;
+                frames[frame_idx].pc = target;
                 continue;
             }
             Instruction::JumpIfFalse { cond, target } => {
-                if !load(&registers, *cond).is_truthy() {
-                    pc = *target;
+                let frame = &mut frames[frame_idx];
+                if !load_register(&frame.registers, cond).is_truthy() {
+                    frame.pc = target;
                     continue;
                 }
+                frame.pc += 1;
             }
 
             // --- Ranges ---
@@ -531,22 +648,23 @@ pub async fn execute_bytecode(
                 step,
                 loc,
             } => {
-                let start_val = load(&registers, *start).as_number().ok_or_else(|| {
+                let frame = &mut frames[frame_idx];
+                let start_val = load_register(&frame.registers, start).as_number().ok_or_else(|| {
                     JitError::runtime(
                         "Range start must be a number",
                         loc.line as usize,
                         loc.col as usize,
                     )
                 })?;
-                let end_val = load(&registers, *end).as_number().ok_or_else(|| {
+                let end_val = load_register(&frame.registers, end).as_number().ok_or_else(|| {
                     JitError::runtime(
                         "Range end must be a number",
                         loc.line as usize,
                         loc.col as usize,
                     )
                 })?;
-                let step_val = if let Some(step_reg) = *step {
-                    load(&registers, step_reg).as_number().ok_or_else(|| {
+                let step_val = if let Some(step_reg) = step {
+                    load_register(&frame.registers, step_reg).as_number().ok_or_else(|| {
                         JitError::runtime(
                             "Range step must be a number",
                             loc.line as usize,
@@ -563,8 +681,9 @@ pub async fn execute_bytecode(
                         end: end_val,
                         step: step_val,
                     },
-                    unsafe { registers.get_unchecked(*dst) },
+                    unsafe { frame.registers.get_unchecked(dst) },
                 );
+                frame.pc += 1;
             }
             Instruction::RangeInfo {
                 range,
@@ -572,7 +691,8 @@ pub async fn execute_bytecode(
                 end_dst,
                 step_dst,
             } => {
-                let range_val = load(&registers, *range);
+                let frame = &mut frames[frame_idx];
+                let range_val = load_register(&frame.registers, range);
                 let (s, e, st) = if let Some(oid) = range_val.as_obj_id() {
                     let heap = ctx.heap.objects.read();
                     if let Some(Some(obj_ref)) = heap.get(oid as usize) {
@@ -587,34 +707,38 @@ pub async fn execute_bytecode(
                 } else {
                     (0.0, 0.0, 1.0)
                 };
-                store(&registers, *start_dst, Value::number(s));
-                store(&registers, *end_dst, Value::number(e));
-                store(&registers, *step_dst, Value::number(st));
+                store_register(&frame.registers, start_dst, Value::number(s));
+                store_register(&frame.registers, end_dst, Value::number(e));
+                store_register(&frame.registers, step_dst, Value::number(st));
+                frame.pc += 1;
             }
 
             // --- Arithmetic ---
             Instruction::Not { dst, src, .. } => {
-                store(
-                    &registers,
-                    *dst,
-                    Value::bool(!load(&registers, *src).is_truthy()),
+                let frame = &mut frames[frame_idx];
+                store_register(
+                    &frame.registers,
+                    dst,
+                    Value::bool(!load_register(&frame.registers, src).is_truthy()),
                 );
+                frame.pc += 1;
             }
             Instruction::Add { dst, lhs, rhs, loc } => {
-                let l_val = load(&registers, *lhs);
-                let r_val = load(&registers, *rhs);
+                let frame = &mut frames[frame_idx];
+                let l_val = load_register(&frame.registers, lhs);
+                let r_val = load_register(&frame.registers, rhs);
                 let l_bits = l_val.to_bits();
                 let r_bits = r_val.to_bits();
 
                 if (l_bits & QNAN) != QNAN && (r_bits & QNAN) != QNAN {
                     // Fast path: plain f64 + f64
-                    store(
-                        &registers,
-                        *dst,
+                    store_register(
+                        &frame.registers,
+                        dst,
                         Value::number(f64::from_bits(l_bits) + f64::from_bits(r_bits)),
                     );
                 } else if let (Some(lv), Some(rv)) = (l_val.as_number(), r_val.as_number()) {
-                    store(&registers, *dst, Value::number(lv + rv));
+                    store_register(&frame.registers, dst, Value::number(lv + rv));
                 } else {
                     // String concatenation
                     let combined = l_val
@@ -630,11 +754,11 @@ pub async fn execute_bytecode(
 
                     match combined {
                         Some(s) if Value::sso(&s).is_some() => {
-                            store(&registers, *dst, Value::sso(&s).unwrap());
+                            store_register(&frame.registers, dst, Value::sso(&s).unwrap());
                         }
                         Some(s) => {
                             ctx.alloc(ManagedObject::String(Arc::from(s)), unsafe {
-                                registers.get_unchecked(*dst)
+                                frame.registers.get_unchecked(dst)
                             });
                         }
                         None => {
@@ -646,49 +770,87 @@ pub async fn execute_bytecode(
                         }
                     }
                 }
+                frame.pc += 1;
             }
-            Instruction::Sub { dst, lhs, rhs, loc } => binary_op!(dst, lhs, rhs, -, loc),
-            Instruction::Mul { dst, lhs, rhs, loc } => binary_op!(dst, lhs, rhs, *, loc),
-            Instruction::Div { dst, lhs, rhs, loc } => binary_op!(dst, lhs, rhs, /, loc),
+            Instruction::Sub { dst, lhs, rhs, loc } => {
+                let frame = &mut frames[frame_idx];
+                binary_op!(&frame.registers, dst, lhs, rhs, -, loc);
+                frame.pc += 1;
+            }
+            Instruction::Mul { dst, lhs, rhs, loc } => {
+                let frame = &mut frames[frame_idx];
+                binary_op!(&frame.registers, dst, lhs, rhs, *, loc);
+                frame.pc += 1;
+            }
+            Instruction::Div { dst, lhs, rhs, loc } => {
+                let frame = &mut frames[frame_idx];
+                binary_op!(&frame.registers, dst, lhs, rhs, /, loc);
+                frame.pc += 1;
+            }
 
             // --- Increment ---
             Instruction::Increment(reg) => {
-                atomic_increment!(unsafe { registers.get_unchecked(*reg) });
+                let frame = &mut frames[frame_idx];
+                atomic_increment!(unsafe { frame.registers.get_unchecked(reg) });
+                frame.pc += 1;
             }
             Instruction::IncrementGlobal(global) => {
-                atomic_increment!(unsafe { ctx.globals.get_unchecked(*global) });
+                atomic_increment!(unsafe { ctx.globals.get_unchecked(global) });
+                frames[frame_idx].pc += 1;
             }
 
             // --- Equality / Comparison ---
             Instruction::Eq { dst, lhs, rhs } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-                store(
-                    &registers,
-                    *dst,
+                let frame = &mut frames[frame_idx];
+                let l_bits = unsafe { frame.registers.get_unchecked(lhs).load(Ordering::Relaxed) };
+                let r_bits = unsafe { frame.registers.get_unchecked(rhs).load(Ordering::Relaxed) };
+                store_register(
+                    &frame.registers,
+                    dst,
                     Value::bool(values_equal_fast(&ctx, l_bits, r_bits)),
                 );
+                frame.pc += 1;
             }
             Instruction::Ne { dst, lhs, rhs } => {
-                let l_bits = unsafe { registers.get_unchecked(*lhs).load(Ordering::Relaxed) };
-                let r_bits = unsafe { registers.get_unchecked(*rhs).load(Ordering::Relaxed) };
-                store(
-                    &registers,
-                    *dst,
+                let frame = &mut frames[frame_idx];
+                let l_bits = unsafe { frame.registers.get_unchecked(lhs).load(Ordering::Relaxed) };
+                let r_bits = unsafe { frame.registers.get_unchecked(rhs).load(Ordering::Relaxed) };
+                store_register(
+                    &frame.registers,
+                    dst,
                     Value::bool(!values_equal_fast(&ctx, l_bits, r_bits)),
                 );
+                frame.pc += 1;
             }
-            Instruction::Lt { dst, lhs, rhs, loc } => compare_op!(dst, lhs, rhs, <,  loc),
-            Instruction::Le { dst, lhs, rhs, loc } => compare_op!(dst, lhs, rhs, <=, loc),
-            Instruction::Gt { dst, lhs, rhs, loc } => compare_op!(dst, lhs, rhs, >,  loc),
-            Instruction::Ge { dst, lhs, rhs, loc } => compare_op!(dst, lhs, rhs, >=, loc),
+            Instruction::Lt { dst, lhs, rhs, loc } => {
+                let frame = &mut frames[frame_idx];
+                compare_op!(&frame.registers, dst, lhs, rhs, <, loc);
+                frame.pc += 1;
+            }
+            Instruction::Le { dst, lhs, rhs, loc } => {
+                let frame = &mut frames[frame_idx];
+                compare_op!(&frame.registers, dst, lhs, rhs, <=, loc);
+                frame.pc += 1;
+            }
+            Instruction::Gt { dst, lhs, rhs, loc } => {
+                let frame = &mut frames[frame_idx];
+                compare_op!(&frame.registers, dst, lhs, rhs, >, loc);
+                frame.pc += 1;
+            }
+            Instruction::Ge { dst, lhs, rhs, loc } => {
+                let frame = &mut frames[frame_idx];
+                compare_op!(&frame.registers, dst, lhs, rhs, >=, loc);
+                frame.pc += 1;
+            }
 
             // --- Lists ---
             Instruction::NewList { dst, len } => {
-                let elements: Vec<AtomicU64> = (0..*len).map(|_| AtomicU64::new(0)).collect();
+                let frame = &mut frames[frame_idx];
+                let elements: Vec<AtomicU64> = (0..len).map(|_| AtomicU64::new(0)).collect();
                 ctx.alloc(ManagedObject::List(RwLock::new(elements)), unsafe {
-                    registers.get_unchecked(*dst)
+                    frame.registers.get_unchecked(dst)
                 });
+                frame.pc += 1;
             }
             Instruction::ListGet {
                 dst,
@@ -696,8 +858,9 @@ pub async fn execute_bytecode(
                 index_reg,
                 loc,
             } => {
-                let list_val = load(&registers, *list);
-                let index = load(&registers, *index_reg)
+                let frame = &mut frames[frame_idx];
+                let list_val = load_register(&frame.registers, list);
+                let index = load_register(&frame.registers, index_reg)
                     .as_number()
                     .map(|n| n as usize)
                     .ok_or_else(|| {
@@ -746,10 +909,11 @@ pub async fn execute_bytecode(
                     )
                 })?;
                 unsafe {
-                    registers
-                        .get_unchecked(*dst)
+                    frame.registers
+                        .get_unchecked(dst)
                         .store(slot.load(Ordering::Relaxed), Ordering::Relaxed);
                 }
+                frame.pc += 1;
             }
             Instruction::ListSet {
                 list,
@@ -757,10 +921,11 @@ pub async fn execute_bytecode(
                 src,
                 loc,
             } => {
-                let list_val = load(&registers, *list);
+                let frame = &mut frames[frame_idx];
+                let list_val = load_register(&frame.registers, list);
                 let index_bits =
-                    unsafe { registers.get_unchecked(*index_reg).load(Ordering::Relaxed) };
-                let src_bits = unsafe { registers.get_unchecked(*src).load(Ordering::Relaxed) };
+                    unsafe { frame.registers.get_unchecked(index_reg).load(Ordering::Relaxed) };
+                let src_bits = unsafe { frame.registers.get_unchecked(src).load(Ordering::Relaxed) };
 
                 let index = if (index_bits & QNAN) != QNAN {
                     f64::from_bits(index_bits) as usize
@@ -823,15 +988,18 @@ pub async fn execute_bytecode(
                                 ctx.heap.metadata.lock().unwrap().remembered_set.insert(oid);
                             }
                     }
+                frame.pc += 1;
             }
 
             // --- Objects ---
             Instruction::NewObject { dst, capacity } => {
+                let frame = &mut frames[frame_idx];
                 let fields =
-                    rustc_hash::FxHashMap::with_capacity_and_hasher(*capacity, Default::default());
+                    rustc_hash::FxHashMap::with_capacity_and_hasher(capacity, Default::default());
                 ctx.alloc(ManagedObject::Object(RwLock::new(fields)), unsafe {
-                    registers.get_unchecked(*dst)
+                    frame.registers.get_unchecked(dst)
                 });
+                frame.pc += 1;
             }
             Instruction::ObjectGet {
                 dst,
@@ -839,7 +1007,8 @@ pub async fn execute_bytecode(
                 name_id,
                 loc,
             } => {
-                let obj_val = load(&registers, *obj);
+                let frame = &mut frames[frame_idx];
+                let obj_val = load_register(&frame.registers, obj);
 
                 enum GetResult {
                     Val(Value),
@@ -854,13 +1023,13 @@ pub async fn execute_bytecode(
                             ManagedObject::Object(fields) => {
                                 let fields = fields.read();
                                 let val = fields
-                                    .get(name_id)
+                                    .get(&name_id)
                                     .map(|s| Value::from_bits(s.load(Ordering::Relaxed)))
                                     .unwrap_or_else(|| Value::from_bits(0));
                                 GetResult::Val(val)
                             }
                             ManagedObject::Timestamp(start) => {
-                                let val = if pool_name(&ctx, *name_id) == "elapsed" {
+                                let val = if pool_name(&ctx, name_id) == "elapsed" {
                                     Value::number(start.elapsed().as_secs_f64())
                                 } else {
                                     Value::from_bits(0)
@@ -868,18 +1037,18 @@ pub async fn execute_bytecode(
                                 GetResult::Val(val)
                             }
                             ManagedObject::List(_) => {
-                                if pool_name(&ctx, *name_id) == "pad" {
-                                    GetResult::Method(obj_val, *name_id)
+                                if pool_name(&ctx, name_id) == "pad" {
+                                    GetResult::Method(obj_val, name_id)
                                 } else {
                                     GetResult::Val(Value::from_bits(0))
                                 }
                             }
                             ManagedObject::Range { start, end, .. } => {
                                 
-                                match pool_name(&ctx, *name_id) {
+                                match pool_name(&ctx, name_id) {
                                     "start" => GetResult::Val(Value::number(*start)),
                                     "end" => GetResult::Val(Value::number(*end)),
-                                    "step" => GetResult::Method(obj_val, *name_id),
+                                    "step" => GetResult::Method(obj_val, name_id),
                                     _ => GetResult::Val(Value::from_bits(0)),
                                 }
                             }
@@ -893,7 +1062,7 @@ pub async fn execute_bytecode(
                 };
 
                 match get_result {
-                    GetResult::Val(v) => store(&registers, *dst, v),
+                    GetResult::Val(v) => store_register(&frame.registers, dst, v),
                     GetResult::Method(recv, nid) => {
                         let temp = AtomicU64::new(0);
                         ctx.alloc(
@@ -903,9 +1072,9 @@ pub async fn execute_bytecode(
                             },
                             &temp,
                         );
-                        store(
-                            &registers,
-                            *dst,
+                        store_register(
+                            &frame.registers,
+                            dst,
                             Value::from_bits(temp.load(Ordering::Relaxed)),
                         );
                     }
@@ -913,6 +1082,7 @@ pub async fn execute_bytecode(
                         return Err(JitError::runtime(msg, loc.line as usize, loc.col as usize));
                     }
                 }
+                frame.pc += 1;
             }
             Instruction::ObjectSet {
                 obj,
@@ -920,8 +1090,9 @@ pub async fn execute_bytecode(
                 src,
                 loc,
             } => {
-                let obj_bits = unsafe { registers.get_unchecked(*obj).load(Ordering::Relaxed) };
-                let src_bits = unsafe { registers.get_unchecked(*src).load(Ordering::Relaxed) };
+                let frame = &mut frames[frame_idx];
+                let obj_bits = unsafe { frame.registers.get_unchecked(obj).load(Ordering::Relaxed) };
+                let src_bits = unsafe { frame.registers.get_unchecked(src).load(Ordering::Relaxed) };
                 let obj_val = Value::from_bits(obj_bits);
 
                 let oid = obj_val.as_obj_id().ok_or_else(|| {
@@ -953,11 +1124,11 @@ pub async fn execute_bytecode(
                 // Insert or update field (prefer read-lock update when slot exists).
                 {
                     let fields_read = fields.read();
-                    if let Some(slot) = fields_read.get(name_id) {
+                    if let Some(slot) = fields_read.get(&name_id) {
                         slot.store(src_bits, Ordering::Relaxed);
                     } else {
                         drop(fields_read);
-                        fields.write().insert(*name_id, AtomicU64::new(src_bits));
+                        fields.write().insert(name_id, AtomicU64::new(src_bits));
                     }
                 }
 
@@ -968,6 +1139,7 @@ pub async fn execute_bytecode(
                             && src_obj.generation == Generation::Nursery {
                                 ctx.heap.metadata.lock().unwrap().remembered_set.insert(oid);
                             }
+                frame.pc += 1;
             }
 
             // --- Concurrency ---
@@ -976,14 +1148,15 @@ pub async fn execute_bytecode(
                     instructions: t_instrs,
                     locals_count,
                     captures,
-                } = &**box_data;
-                let body = Arc::clone(t_instrs);
+                } = *box_data;
+                let body = t_instrs;
                 let s_ctx = ctx.clone();
 
                 let t_regs: Vec<AtomicU64> =
-                    (0..*locals_count).map(|_| AtomicU64::new(0)).collect();
+                    (0..locals_count).map(|_| AtomicU64::new(0)).collect();
+                let parent_registers = Arc::clone(&frames[frame_idx].registers);
                 for &reg in captures.iter() {
-                    let bits = unsafe { registers.get_unchecked(reg).load(Ordering::Relaxed) };
+                    let bits = unsafe { parent_registers.get_unchecked(reg).load(Ordering::Relaxed) };
                     t_regs[reg].store(bits, Ordering::Relaxed);
                 }
                 let thread_regs: Arc<[AtomicU64]> = Arc::from(t_regs);
@@ -999,15 +1172,15 @@ pub async fn execute_bytecode(
                     drain_join_set(&mut js).await?;
                     res.map(|_| ())
                 });
+                frames[frame_idx].pc += 1;
             }
         }
 
-        pc += 1;
         if instr_count & 0x3FFF == 0 {
             tokio::task::yield_now().await;
         }
     }
-    Ok(Value::from_bits(0))
+    })
 }
 
 // ---------------------------------------------------------------------------
