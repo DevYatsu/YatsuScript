@@ -1,0 +1,48 @@
+//! I/O built-ins: `print`, `str`.
+
+use crate::context::NativeFn;
+use crate::heap::ManagedObject;
+use crate::value_fmt::stringify_value;
+use rustc_hash::FxHashMap;
+use std::io::Write as _;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use ys_core::compiler::Value;
+use ys_core::error::JitError;
+
+pub fn register(fns: &mut FxHashMap<String, NativeFn>) {
+    fns.insert("print".into(), Arc::new(|ctx, args, _| {
+        Box::pin(async move {
+            for (i, val) in args.iter().enumerate() {
+                if i > 0 { print!(" "); }
+                print!("{}", stringify_value(&ctx, *val));
+            }
+            println!();
+            let _ = std::io::stdout().flush();
+            Ok(Value::from_bits(0))
+        })
+    }));
+
+    fns.insert("str".into(), Arc::new(|ctx, args, loc| {
+        Box::pin(async move {
+            let [val] = args.as_slice() else {
+                return Err(JitError::runtime(
+                    "str() expects 1 argument",
+                    loc.line as usize,
+                    loc.col as usize,
+                ));
+            };
+            let s = stringify_value(&ctx, *val);
+            if let Some(sso) = Value::sso(&s) {
+                Ok(sso)
+            } else {
+                let temp = AtomicU64::new(0);
+                ctx.alloc(ManagedObject::String(Arc::from(s)), &temp);
+                Ok(Value::from_bits(std::sync::atomic::AtomicU64::load(
+                    &temp,
+                    std::sync::atomic::Ordering::Relaxed,
+                )))
+            }
+        })
+    }));
+}

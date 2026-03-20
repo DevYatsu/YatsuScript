@@ -1,0 +1,47 @@
+//! Collection built-ins: `len`.
+
+use crate::context::NativeFn;
+use crate::heap::ManagedObject;
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
+use ys_core::compiler::Value;
+use ys_core::error::JitError;
+
+pub fn register(fns: &mut FxHashMap<String, NativeFn>) {
+    fns.insert("len".into(), Arc::new(|ctx, args, loc| {
+        Box::pin(async move {
+            let [val] = args.as_slice() else {
+                return Err(JitError::runtime(
+                    "len() expects 1 argument",
+                    loc.line as usize,
+                    loc.col as usize,
+                ));
+            };
+            let val = *val;
+
+            if let Some(oid) = val.as_obj_id() {
+                let heap = ctx.heap.objects.read();
+                if let Some(Some(obj)) = heap.get(oid as usize) {
+                    return Ok(Value::number(match &obj.obj {
+                        ManagedObject::String(s)  => s.len() as f64,
+                        ManagedObject::List(l)    => l.read().len() as f64,
+                        ManagedObject::Object(o)  => o.read().len() as f64,
+                        ManagedObject::Range { start, end, step } => {
+                            if *step == 0.0 { 0.0 }
+                            else { ((end - start) / step).ceil().max(0.0) }
+                        }
+                        ManagedObject::Timestamp(_) | ManagedObject::BoundMethod { .. } => 0.0,
+                    }));
+                }
+            } else if let Some(s) = ctx.value_as_string(val) {
+                return Ok(Value::number(s.len() as f64));
+            }
+
+            Err(JitError::runtime(
+                "len() expects string or list",
+                loc.line as usize,
+                loc.col as usize,
+            ))
+        })
+    }));
+}

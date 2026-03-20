@@ -1,0 +1,21 @@
+[package]
+name        = "ys-cli"
+version     = "0.1.0"
+edition     = "2024"
+description = "YatsuScript CLI: runner, REPL, and code formatter."
+license     = "MIT"
+
+[[bin]]
+name = "yatsuscript"
+path = "src/main.rs"
+
+[dependencies]
+ys-core      = { path = "../ys-core" }
+ys-runtime   = { path = "../ys-runtime" }
+clap         = { version = "4.5.31", features = ["derive"] }
+tokio        = { version = "1.50.0", features = ["full"] }
+rustyline    = { version = "13.0.0", features = ["derive"] }
+rayon        = "1.11.0"
+colored      = "3.0.0"
+logos        = "0.16.1"
+thiserror    = "2.0.18"

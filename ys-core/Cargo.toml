@@ -1,0 +1,11 @@
+[package]
+name        = "ys-core"
+version     = "0.1.0"
+edition     = "2024"
+description = "YatsuScript language frontend: lexer, parser, bytecode compiler, and error types."
+license     = "MIT"
+
+[dependencies]
+logos      = "0.16.1"
+rustc-hash = "2.1.1"
+thiserror  = "2.0.18"
