@@ -1,24 +1,11 @@
 use crate::{
-    compiler::{Instruction, Loc, Program, UserFunction, Value},
+    compiler::{Instruction, Program, UserFunction, Value},
     error::JitError,
     lexer::Token,
+    token_stream::{TokenStream, VarInfo},
 };
-use logos::Logos;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
-
-#[derive(Clone, Copy)]
-pub struct VarInfo {
-    idx: usize,
-    is_mut: bool,
-    is_global: bool,
-    first_line: usize,
-}
-
-struct TokenData<'source> {
-    token: Token<'source>,
-    loc: Loc,
-}
 
 #[derive(Clone, Copy)]
 enum Accessor {
@@ -33,8 +20,7 @@ enum TemplatePart<'source> {
 
 /// The Parser transforms source code into a compiled Program (bytecode).
 pub struct Parser<'source> {
-    tokens: Vec<TokenData<'source>>,
-    pos: usize,
+    stream: TokenStream<'source>,
 
     /// Global variables.
     globals: FxHashMap<&'source str, VarInfo>,
@@ -60,10 +46,9 @@ pub struct Parser<'source> {
 
 impl<'source> Parser<'source> {
     pub fn new(input: &'source str) -> Result<Self, JitError> {
-        let tokens = Self::lex_all(input)?;
+        let tokens = TokenStream::lex_all(input)?;
         Ok(Self {
-            tokens,
-            pos: 0,
+            stream: TokenStream::new(tokens),
             globals: FxHashMap::default(),
             locals: FxHashMap::default(),
             strings: Vec::with_capacity(64),
@@ -79,93 +64,9 @@ impl<'source> Parser<'source> {
         })
     }
 
-    fn lex_all(input: &'source str) -> Result<Vec<TokenData<'source>>, JitError> {
-        let mut lexer = Token::lexer(input);
-        let mut tokens = Vec::with_capacity(input.len() / 4);
-        let mut line = 1;
-        let mut line_start = 0;
-        let mut last_span_end = 0;
-
-        while let Some(res) = lexer.next() {
-            let span = lexer.span();
-
-            // Count newlines in the gap (skipped whitespace/comments)
-            let gap = &input[last_span_end..span.start];
-            for (i, c) in gap.char_indices() {
-                if c == '\n' {
-                    line += 1;
-                    line_start = last_span_end + i + 1;
-                }
-            }
-
-            let loc = Loc {
-                line: line as u32,
-                col: (span.start - line_start + 1) as u32,
-            };
-
-            match res {
-                Ok(t) => {
-                    if t == Token::Newline {
-                        tokens.push(TokenData { token: t, loc });
-                        line += 1;
-                        line_start = span.end;
-                    } else if t != Token::LineComment {
-                        tokens.push(TokenData { token: t, loc });
-                    }
-                }
-                Err(e) => {
-                    return Err(JitError::Lexing {
-                        err: e,
-                        loc: crate::error::ErrorLoc::new(line, span.start - line_start + 1),
-                    });
-                }
-            }
-            last_span_end = span.end;
-        }
-        Ok(tokens)
-    }
-
-    /// Advance the lexer and return the previous token.
-    fn advance(&mut self) -> Result<Token<'source>, JitError> {
-        if let Some(td) = self.tokens.get(self.pos) {
-            self.pos += 1;
-            Ok(td.token)
-        } else {
-            let loc = self.loc();
-            Err(JitError::parsing(
-                "Unexpected EOF".to_string(),
-                loc.line as usize,
-                loc.col as usize,
-            ))
-        }
-    }
-
-    #[inline(always)]
-    fn peek(&self) -> Option<Token<'source>> {
-        self.tokens.get(self.pos).map(|td| td.token)
-    }
-
-    #[inline(always)]
-    fn peek_n(&self, n: usize) -> Option<Token<'source>> {
-        self.tokens.get(self.pos + n).map(|td| td.token)
-    }
-
-    #[inline(always)]
-    fn loc(&self) -> Loc {
-        self.tokens
-            .get(self.pos)
-            .map(|td| td.loc)
-            .unwrap_or_else(|| {
-                self.tokens
-                    .last()
-                    .map(|td| td.loc)
-                    .unwrap_or(Loc { line: 1, col: 1 })
-            })
-    }
-
     pub fn compile(mut self) -> Result<Program, JitError> {
         let mut instructions = Vec::new();
-        while self.peek().is_some() {
+        while self.stream.peek().is_some() {
             if let Some(res) = self.parse_statement(&mut instructions) {
                 res?;
             } else {
@@ -199,26 +100,6 @@ impl<'source> Parser<'source> {
         r
     }
 
-    fn skip_newlines(&mut self) {
-        while matches!(self.peek(), Some(Token::Newline) | Some(Token::LineComment)) {
-            self.advance().ok();
-        }
-    }
-
-    fn expect(&mut self, expected: Token) -> Result<(), JitError> {
-        let loc = self.loc();
-        let t = self.advance()?;
-        if t == expected {
-            Ok(())
-        } else {
-            Err(JitError::parsing(
-                format!("Expected {:?}, found {:?}", expected, t),
-                loc.line as usize,
-                loc.col as usize,
-            ))
-        }
-    }
-
     fn parse_expr(&mut self, instructions: &mut Vec<Instruction>) -> Result<usize, JitError> {
         self.parse_binary(0, instructions)
     }
@@ -229,7 +110,7 @@ impl<'source> Parser<'source> {
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
         let mut lhs = self.parse_primary(instructions)?;
-        while let Some(op) = self.peek() {
+        while let Some(op) = self.stream.peek() {
             let prec = match op {
                 Token::Range => 0,
                 Token::Eq | Token::Ne => 1,
@@ -241,8 +122,8 @@ impl<'source> Parser<'source> {
             if prec < min_prec {
                 break;
             }
-            self.advance()?;
-            let loc = self.loc();
+            self.stream.advance()?;
+            let loc = self.stream.loc();
             let rhs = self.parse_binary(prec + 1, instructions)?;
             let dst = self.alloc_reg();
             let instr = match op {
@@ -272,12 +153,12 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_primary(&mut self, instructions: &mut Vec<Instruction>) -> Result<usize, JitError> {
-        let loc = self.loc();
-        let token = self.advance()?;
+        let loc = self.stream.loc();
+        let token = self.stream.advance()?;
         let mut current_reg = match token {
             Token::LParen => {
                 let r = self.parse_expr(instructions)?;
-                self.expect(Token::RParen)?;
+                self.stream.expect(Token::RParen)?;
                 Ok(r)
             }
             Token::Number(n) => {
@@ -308,8 +189,8 @@ impl<'source> Parser<'source> {
             Token::LBracket => self.parse_list_literal(instructions),
             Token::LBrace => self.parse_object_literal(instructions),
             Token::Identifier(id) => {
-                if matches!(self.peek(), Some(Token::LParen)) {
-                    self.advance()?; // consume (
+                if matches!(self.stream.peek(), Some(Token::LParen)) {
+                    self.stream.advance()?; // consume (
                     let args = self.parse_call_args(instructions)?;
                     let dst = self.alloc_reg();
 
@@ -320,7 +201,7 @@ impl<'source> Parser<'source> {
                                 callee_reg,
                                 args_regs: Arc::from(args),
                                 dst: Some(dst),
-                                loc: self.loc(),
+                                loc: self.stream.loc(),
                             },
                         )));
                     } else {
@@ -329,7 +210,7 @@ impl<'source> Parser<'source> {
                             name_id,
                             args_regs: Arc::from(args),
                             dst: Some(dst),
-                            loc: self.loc(),
+                            loc: self.stream.loc(),
                         })));
                     }
                     Ok(dst)
@@ -362,30 +243,30 @@ impl<'source> Parser<'source> {
 
         // Handle suffixes:indexing [expr] and property access .id
         loop {
-            self.skip_newlines();
-            match self.peek() {
+            self.stream.skip_newlines();
+            match self.stream.peek() {
                 Some(Token::LBracket) => {
-                    self.advance()?;
+                    self.stream.advance()?;
                     let index_reg = self.parse_expr(instructions)?;
-                    self.expect(Token::RBracket)?;
+                    self.stream.expect(Token::RBracket)?;
                     let dst = self.alloc_reg();
                     instructions.push(Instruction::ListGet {
                         dst,
                         list: current_reg,
                         index_reg,
-                        loc: self.loc(),
+                        loc: self.stream.loc(),
                     });
                     current_reg = dst;
                 }
                 Some(Token::Dot) => {
-                    self.advance()?;
-                    let id = match self.advance()? {
+                    self.stream.advance()?;
+                    let id = match self.stream.advance()? {
                         Token::Identifier(id) => id,
                         t => {
                             return Err(JitError::parsing(
                                 format!("Expected property name after '.', found {:?}", t),
-                                self.loc().line as usize,
-                                self.loc().col as usize,
+                                self.stream.loc().line as usize,
+                                self.stream.loc().col as usize,
                             ));
                         }
                     };
@@ -395,12 +276,12 @@ impl<'source> Parser<'source> {
                         dst,
                         obj: current_reg,
                         name_id,
-                        loc: self.loc(),
+                        loc: self.stream.loc(),
                     });
                     current_reg = dst;
                 }
                 Some(Token::LParen) => {
-                    self.advance()?;
+                    self.stream.advance()?;
                     let args = self.parse_call_args(instructions)?;
                     let dst = self.alloc_reg();
                     instructions.push(Instruction::CallDynamic(Box::new(
@@ -408,7 +289,7 @@ impl<'source> Parser<'source> {
                             callee_reg: current_reg,
                             args_regs: Arc::from(args),
                             dst: Some(dst),
-                            loc: self.loc(),
+                            loc: self.stream.loc(),
                         },
                     )));
                     current_reg = dst;
@@ -424,16 +305,16 @@ impl<'source> Parser<'source> {
         instructions: &mut Vec<Instruction>,
     ) -> Result<Vec<usize>, JitError> {
         let mut args = Vec::new();
-        self.skip_newlines();
-        if !matches!(self.peek(), Some(Token::RParen)) {
+        self.stream.skip_newlines();
+        if !matches!(self.stream.peek(), Some(Token::RParen)) {
             loop {
-                self.skip_newlines();
+                self.stream.skip_newlines();
                 args.push(self.parse_expr(instructions)?);
-                self.skip_newlines();
-                match self.peek() {
+                self.stream.skip_newlines();
+                match self.stream.peek() {
                     Some(Token::Comma) => {
-                        self.advance()?;
-                        if matches!(self.peek(), Some(Token::RParen)) {
+                        self.stream.advance()?;
+                        if matches!(self.stream.peek(), Some(Token::RParen)) {
                             break;
                         }
                     }
@@ -441,7 +322,7 @@ impl<'source> Parser<'source> {
                 }
             }
         }
-        self.expect(Token::RParen)?;
+        self.stream.expect(Token::RParen)?;
         Ok(args)
     }
 
@@ -450,15 +331,15 @@ impl<'source> Parser<'source> {
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
         let mut elements = Vec::new();
-        self.skip_newlines();
-        if !matches!(self.peek(), Some(Token::RBracket)) {
+        self.stream.skip_newlines();
+        if !matches!(self.stream.peek(), Some(Token::RBracket)) {
             loop {
-                self.skip_newlines();
+                self.stream.skip_newlines();
                 elements.push(self.parse_expr(instructions)?);
-                self.skip_newlines();
-                if matches!(self.peek(), Some(Token::Comma)) {
-                    self.advance()?;
-                    if matches!(self.peek(), Some(Token::RBracket)) {
+                self.stream.skip_newlines();
+                if matches!(self.stream.peek(), Some(Token::Comma)) {
+                    self.stream.advance()?;
+                    if matches!(self.stream.peek(), Some(Token::RBracket)) {
                         break;
                     }
                 } else {
@@ -466,7 +347,7 @@ impl<'source> Parser<'source> {
                 }
             }
         }
-        self.expect(Token::RBracket)?;
+        self.stream.expect(Token::RBracket)?;
 
         let dst = self.alloc_reg();
         instructions.push(Instruction::NewList {
@@ -483,7 +364,7 @@ impl<'source> Parser<'source> {
                 list: dst,
                 index_reg,
                 src,
-                loc: self.loc(),
+                loc: self.stream.loc(),
             });
         }
         Ok(dst)
@@ -494,27 +375,27 @@ impl<'source> Parser<'source> {
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
         let mut fields = Vec::with_capacity(4);
-        self.skip_newlines();
-        if !matches!(self.peek(), Some(Token::RBrace)) {
+        self.stream.skip_newlines();
+        if !matches!(self.stream.peek(), Some(Token::RBrace)) {
             loop {
-                self.skip_newlines();
-                let name = match self.advance()? {
+                self.stream.skip_newlines();
+                let name = match self.stream.advance()? {
                     Token::Identifier(id) => id,
                     t => {
                         return Err(JitError::parsing(
                             format!("Expected field name, found {:?}", t),
-                            self.loc().line as usize,
-                            self.loc().col as usize,
+                            self.stream.loc().line as usize,
+                            self.stream.loc().col as usize,
                         ));
                     }
                 };
-                self.expect(Token::Colon)?;
+                self.stream.expect(Token::Colon)?;
                 let val_reg = self.parse_expr(instructions)?;
                 fields.push((name, val_reg));
-                self.skip_newlines();
-                if matches!(self.peek(), Some(Token::Comma)) {
-                    self.advance()?;
-                    if matches!(self.peek(), Some(Token::RBrace)) {
+                self.stream.skip_newlines();
+                if matches!(self.stream.peek(), Some(Token::Comma)) {
+                    self.stream.advance()?;
+                    if matches!(self.stream.peek(), Some(Token::RBrace)) {
                         break;
                     }
                 } else {
@@ -522,7 +403,7 @@ impl<'source> Parser<'source> {
                 }
             }
         }
-        self.expect(Token::RBrace)?;
+        self.stream.expect(Token::RBrace)?;
 
         let dst = self.alloc_reg();
         instructions.push(Instruction::NewObject {
@@ -535,7 +416,7 @@ impl<'source> Parser<'source> {
                 obj: dst,
                 name_id,
                 src,
-                loc: self.loc(),
+                loc: self.stream.loc(),
             });
         }
         Ok(dst)
@@ -546,60 +427,60 @@ impl<'source> Parser<'source> {
         instructions: &mut Vec<Instruction>,
     ) -> Option<Result<(), JitError>> {
         loop {
-            let token = self.peek()?;
+            let token = self.stream.peek()?;
 
             match token {
                 Token::Newline => {
-                    self.advance().ok();
+                    self.stream.advance().ok();
                 }
                 Token::MutableVar => return Some(self.parse_var_decl(true, instructions)),
                 Token::ImmutableVar => return Some(self.parse_var_decl(false, instructions)),
                 Token::For => return Some(self.parse_for_loop(instructions)),
                 Token::While => {
-                    self.advance().ok();
+                    self.stream.advance().ok();
                     return Some(self.parse_while_loop(instructions));
                 }
                 Token::Fn => {
-                    self.advance().ok();
+                    self.stream.advance().ok();
                     return Some(self.parse_fn_decl());
                 }
                 Token::If => {
-                    self.advance().ok();
+                    self.stream.advance().ok();
                     return Some(self.parse_if_stmt(instructions));
                 }
                 Token::Return => {
-                    self.advance().ok();
+                    self.stream.advance().ok();
                     return Some(self.parse_return_stmt(instructions));
                 }
                 Token::Continue => {
-                    self.advance().ok();
+                    self.stream.advance().ok();
                     if let Some(list) = self.loop_continues.last_mut() {
                         list.push(instructions.len());
                         instructions.push(Instruction::Jump(0));
                     } else {
                         return Some(Err(JitError::parsing(
                             "continue outside of loop".to_string(),
-                            self.loc().line as usize,
-                            self.loc().col as usize,
+                            self.stream.loc().line as usize,
+                            self.stream.loc().col as usize,
                         )));
                     }
                     return Some(Ok(()));
                 }
                 Token::Spawn => {
-                    self.advance().ok();
+                    self.stream.advance().ok();
                     return Some(self.parse_spawn_stmt(instructions));
                 }
                 Token::Identifier(id) => {
                     if self.is_assignment() {
-                        self.advance().ok();
+                        self.stream.advance().ok();
                         return Some(self.parse_assignment(id, instructions));
                     } else if matches!(
-                        self.peek_n(1),
+                        self.stream.peek_n(1),
                         Some(Token::Dot) | Some(Token::LBracket) | Some(Token::LParen)
                     ) {
                         return Some(self.parse_expr(instructions).map(|_| ()));
                     } else {
-                        self.advance().ok();
+                        self.stream.advance().ok();
                         return Some(self.parse_call_stmt(id, instructions));
                     }
                 }
@@ -607,8 +488,8 @@ impl<'source> Parser<'source> {
                 _ => {
                     return Some(Err(JitError::parsing(
                         format!("Unexpected token {:?}", token),
-                        self.loc().line as usize,
-                        self.loc().col as usize,
+                        self.stream.loc().line as usize,
+                        self.stream.loc().col as usize,
                     )));
                 }
             }
@@ -616,21 +497,21 @@ impl<'source> Parser<'source> {
     }
 
     fn is_assignment(&self) -> bool {
-        let mut p = self.pos;
-        if p >= self.tokens.len() {
+        let mut p = self.stream.pos;
+        if p >= self.stream.tokens.len() {
             return false;
         }
-        if !matches!(self.tokens[p].token, Token::Identifier(_)) {
+        if !matches!(self.stream.tokens[p].token, Token::Identifier(_)) {
             return false;
         }
         p += 1;
-        while p < self.tokens.len() {
-            match self.tokens[p].token {
+        while p < self.stream.tokens.len() {
+            match self.stream.tokens[p].token {
                 Token::LBracket => {
                     let mut depth = 1;
                     p += 1;
-                    while p < self.tokens.len() && depth > 0 {
-                        match self.tokens[p].token {
+                    while p < self.stream.tokens.len() && depth > 0 {
+                        match self.stream.tokens[p].token {
                             Token::LBracket => depth += 1,
                             Token::RBracket => depth -= 1,
                             _ => {}
@@ -640,7 +521,7 @@ impl<'source> Parser<'source> {
                 }
                 Token::Dot => {
                     p += 1;
-                    if p < self.tokens.len() && matches!(self.tokens[p].token, Token::Identifier(_))
+                    if p < self.stream.tokens.len() && matches!(self.stream.tokens[p].token, Token::Identifier(_))
                     {
                         p += 1;
                     } else {
@@ -659,12 +540,12 @@ impl<'source> Parser<'source> {
         id: &'source str,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), JitError> {
-        let args = if matches!(self.peek(), Some(Token::LParen)) {
-            self.advance()?;
+        let args = if matches!(self.stream.peek(), Some(Token::LParen)) {
+            self.stream.advance()?;
             self.parse_call_args(instructions)?
         } else {
             let mut args = Vec::new();
-            while let Some(t) = self.peek() {
+            while let Some(t) = self.stream.peek() {
                 if matches!(
                     t,
                     Token::Newline | Token::RBrace | Token::RParen | Token::RBracket | Token::Comma
@@ -672,8 +553,8 @@ impl<'source> Parser<'source> {
                     break;
                 }
                 args.push(self.parse_expr(instructions)?);
-                if matches!(self.peek(), Some(Token::Comma)) {
-                    self.advance()?;
+                if matches!(self.stream.peek(), Some(Token::Comma)) {
+                    self.stream.advance()?;
                 } else {
                     break;
                 }
@@ -688,7 +569,7 @@ impl<'source> Parser<'source> {
                     callee_reg,
                     args_regs: Arc::from(args),
                     dst: None,
-                    loc: self.loc(),
+                    loc: self.stream.loc(),
                 },
             )));
         } else {
@@ -697,7 +578,7 @@ impl<'source> Parser<'source> {
                 name_id,
                 args_regs: Arc::from(args),
                 dst: None,
-                loc: self.loc(),
+                loc: self.stream.loc(),
             })));
         }
         Ok(())
@@ -708,30 +589,30 @@ impl<'source> Parser<'source> {
         id: &'source str,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), JitError> {
-        let loc = self.loc();
+        let loc = self.stream.loc();
         let info = self.get_var(id).ok_or_else(|| {
             JitError::unknown_variable(id.to_string(), loc.line as usize, loc.col as usize)
         })?;
 
         let mut accessors = Vec::new();
         loop {
-            match self.peek() {
+            match self.stream.peek() {
                 Some(Token::LBracket) => {
-                    self.advance()?;
+                    self.stream.advance()?;
                     accessors.push(Accessor::Index(self.parse_expr(instructions)?));
-                    self.expect(Token::RBracket)?;
+                    self.stream.expect(Token::RBracket)?;
                 }
                 Some(Token::Dot) => {
-                    self.advance()?;
-                    match self.advance()? {
+                    self.stream.advance()?;
+                    match self.stream.advance()? {
                         Token::Identifier(field) => {
                             accessors.push(Accessor::Field(self.intern(field)))
                         }
                         t => {
                             return Err(JitError::parsing(
                                 format!("Expected field name after '.', found {:?}", t),
-                                self.loc().line as usize,
-                                self.loc().col as usize,
+                                self.stream.loc().line as usize,
+                                self.stream.loc().col as usize,
                             ));
                         }
                     }
@@ -740,16 +621,16 @@ impl<'source> Parser<'source> {
             }
         }
 
-        self.expect(Token::Colon)?;
+        self.stream.expect(Token::Colon)?;
 
         // Optimization: x: x + 1
         if accessors.is_empty() {
-            if let Some(Token::Identifier(rhs_id)) = self.peek()
+            if let Some(Token::Identifier(rhs_id)) = self.stream.peek()
                 && rhs_id == id
-                && matches!(self.peek_n(1), Some(Token::Plus))
-                && matches!(self.peek_n(2), Some(Token::Number(1.0)))
+                && matches!(self.stream.peek_n(1), Some(Token::Plus))
+                && matches!(self.stream.peek_n(2), Some(Token::Number(1.0)))
             {
-                let t3 = self.peek_n(3);
+                let t3 = self.stream.peek_n(3);
                 if matches!(
                     t3,
                     None | Some(Token::Newline)
@@ -757,9 +638,9 @@ impl<'source> Parser<'source> {
                         | Some(Token::Comma)
                         | Some(Token::RParen)
                 ) {
-                    self.advance()?;
-                    self.advance()?;
-                    self.advance()?;
+                    self.stream.advance()?;
+                    self.stream.advance()?;
+                    self.stream.advance()?;
                     if info.is_global {
                         instructions.push(Instruction::IncrementGlobal(info.idx));
                     } else {
@@ -768,12 +649,12 @@ impl<'source> Parser<'source> {
                     return Ok(());
                 }
             }
-            if let Some(Token::Number(1.0)) = self.peek()
-                && matches!(self.peek_n(1), Some(Token::Plus))
-                && let Some(Token::Identifier(rhs_id)) = self.peek_n(2)
+            if let Some(Token::Number(1.0)) = self.stream.peek()
+                && matches!(self.stream.peek_n(1), Some(Token::Plus))
+                && let Some(Token::Identifier(rhs_id)) = self.stream.peek_n(2)
                 && rhs_id == id
             {
-                let t3 = self.peek_n(3);
+                let t3 = self.stream.peek_n(3);
                 if matches!(
                     t3,
                     None | Some(Token::Newline)
@@ -781,9 +662,9 @@ impl<'source> Parser<'source> {
                         | Some(Token::Comma)
                         | Some(Token::RParen)
                 ) {
-                    self.advance()?;
-                    self.advance()?;
-                    self.advance()?;
+                    self.stream.advance()?;
+                    self.stream.advance()?;
+                    self.stream.advance()?;
                     if info.is_global {
                         instructions.push(Instruction::IncrementGlobal(info.idx));
                     } else {
@@ -800,8 +681,8 @@ impl<'source> Parser<'source> {
                 return Err(JitError::RedefinitionOfImmutableVariable {
                     msg: id.to_string(),
                     loc: crate::error::ErrorLoc::new(
-                        self.loc().line as usize,
-                        self.loc().col as usize,
+                        self.stream.loc().line as usize,
+                        self.stream.loc().col as usize,
                     ),
                     orig_line: info.first_line,
                 });
@@ -857,18 +738,18 @@ impl<'source> Parser<'source> {
         is_mut: bool,
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), JitError> {
-        self.advance()?; // consume el/le
-        let id = match self.advance()? {
+        self.stream.advance()?; // consume el/le
+        let id = match self.stream.advance()? {
             Token::Identifier(id) => id,
             t => {
                 return Err(JitError::parsing(
                     format!("Expected identifier, found {:?}", t),
-                    self.loc().line as usize,
-                    self.loc().col as usize,
+                    self.stream.loc().line as usize,
+                    self.stream.loc().col as usize,
                 ));
             }
         };
-        self.expect(Token::Colon)?;
+        self.stream.expect(Token::Colon)?;
         let src = self.parse_expr(instructions)?;
 
         let is_global = !self.is_in_function && !self.is_in_spawn;
@@ -883,7 +764,7 @@ impl<'source> Parser<'source> {
             idx,
             is_mut,
             is_global,
-            first_line: self.loc().line as usize,
+            first_line: self.stream.loc().line as usize,
         };
 
         if is_global {
@@ -897,16 +778,16 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_block(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
-        self.skip_newlines();
-        self.expect(Token::LBrace)?;
-        while self.peek().is_some() && self.peek() != Some(Token::RBrace) {
+        self.stream.skip_newlines();
+        self.stream.expect(Token::LBrace)?;
+        while self.stream.peek().is_some() && self.stream.peek() != Some(Token::RBrace) {
             if let Some(res) = self.parse_statement(instructions) {
                 res?;
             } else {
                 break;
             }
         }
-        self.expect(Token::RBrace)?;
+        self.stream.expect(Token::RBrace)?;
         Ok(())
     }
 
@@ -916,8 +797,8 @@ impl<'source> Parser<'source> {
         instructions.push(Instruction::Jump(0));
         self.parse_block(instructions)?;
 
-        if matches!(self.peek(), Some(Token::Else)) {
-            self.advance()?;
+        if matches!(self.stream.peek(), Some(Token::Else)) {
+            self.stream.advance()?;
             let jump_to_end_idx = instructions.len();
             instructions.push(Instruction::Jump(0));
             instructions[jump_if_false_idx] = Instruction::JumpIfFalse {
@@ -954,19 +835,19 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_for_loop(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
-        let loc = self.loc();
-        self.advance()?; // for
-        let id = match self.advance()? {
+        let loc = self.stream.loc();
+        self.stream.advance()?; // for
+        let id = match self.stream.advance()? {
             Token::Identifier(id) => id,
             t => {
                 return Err(JitError::parsing(
                     format!("Expected identifier, found {:?}", t),
-                    self.loc().line as usize,
-                    self.loc().col as usize,
+                    self.stream.loc().line as usize,
+                    self.stream.loc().col as usize,
                 ));
             }
         };
-        self.expect(Token::In)?;
+        self.stream.expect(Token::In)?;
         let iter_val = self.parse_expr(instructions)?;
 
         let start_reg = self.alloc_reg();
@@ -987,7 +868,7 @@ impl<'source> Parser<'source> {
                 idx: var_idx,
                 is_mut: true,
                 is_global: false,
-                first_line: self.loc().line as usize,
+                first_line: self.stream.loc().line as usize,
             },
         );
 
@@ -1060,38 +941,38 @@ impl<'source> Parser<'source> {
     }
 
     fn parse_fn_decl(&mut self) -> Result<(), JitError> {
-        let name = match self.advance()? {
+        let name = match self.stream.advance()? {
             Token::Identifier(id) => id,
             t => {
                 return Err(JitError::parsing(
                     format!("Expected function name, found {:?}", t),
-                    self.loc().line as usize,
-                    self.loc().col as usize,
+                    self.stream.loc().line as usize,
+                    self.stream.loc().col as usize,
                 ));
             }
         };
-        self.expect(Token::LParen)?;
+        self.stream.expect(Token::LParen)?;
         let mut params = Vec::new();
-        if !matches!(self.peek(), Some(Token::RParen)) {
+        if !matches!(self.stream.peek(), Some(Token::RParen)) {
             loop {
-                match self.advance()? {
+                match self.stream.advance()? {
                     Token::Identifier(id) => params.push(id),
                     t => {
                         return Err(JitError::parsing(
                             format!("Expected parameter name, found {:?}", t),
-                            self.loc().line as usize,
-                            self.loc().col as usize,
+                            self.stream.loc().line as usize,
+                            self.stream.loc().col as usize,
                         ));
                     }
                 }
-                if matches!(self.peek(), Some(Token::Comma)) {
-                    self.advance()?;
+                if matches!(self.stream.peek(), Some(Token::Comma)) {
+                    self.stream.advance()?;
                 } else {
                     break;
                 }
             }
         }
-        self.expect(Token::RParen)?;
+        self.stream.expect(Token::RParen)?;
 
         let old_locals = std::mem::take(&mut self.locals);
         let (old_reg, old_spawn, old_func) = (self.next_reg, self.is_in_spawn, self.is_in_function);
@@ -1107,7 +988,7 @@ impl<'source> Parser<'source> {
                     idx: r,
                     is_mut: false,
                     is_global: false,
-                    first_line: self.loc().line as usize,
+                    first_line: self.stream.loc().line as usize,
                 },
             );
         }
@@ -1135,7 +1016,7 @@ impl<'source> Parser<'source> {
 
     fn parse_return_stmt(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
         let val = if !matches!(
-            self.peek(),
+            self.stream.peek(),
             None | Some(Token::Newline) | Some(Token::RBrace)
         ) {
             Some(self.parse_expr(instructions)?)
@@ -1242,7 +1123,7 @@ impl<'source> Parser<'source> {
                         name_id: str_id,
                         args_regs: Arc::from(vec![reg]),
                         dst: Some(dst),
-                        loc: self.loc(),
+                        loc: self.stream.loc(),
                     })));
                     dst
                 }
@@ -1254,7 +1135,7 @@ impl<'source> Parser<'source> {
                     dst: next,
                     lhs: prev,
                     rhs: part_reg,
-                    loc: self.loc(),
+                    loc: self.stream.loc(),
                 });
                 current_res = Some(next);
             } else {
@@ -1270,16 +1151,16 @@ impl<'source> Parser<'source> {
         src: &'source str,
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
-        let old_tokens = std::mem::take(&mut self.tokens);
-        let old_pos = self.pos;
+        let old_tokens = std::mem::take(&mut self.stream.tokens);
+        let old_pos = self.stream.pos;
 
-        self.tokens = Self::lex_all(src)?;
-        self.pos = 0;
+        self.stream.tokens = TokenStream::lex_all(src)?;
+        self.stream.pos = 0;
 
         let res = self.parse_expr(instructions);
 
-        self.tokens = old_tokens;
-        self.pos = old_pos;
+        self.stream.tokens = old_tokens;
+        self.stream.pos = old_pos;
 
         res
     }

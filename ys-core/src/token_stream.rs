@@ -26,8 +26,8 @@ pub struct TokenData<'source> {
 /// Owns the token vector and current position. The parser
 /// holds one of these and delegates navigation to it.
 pub struct TokenStream<'source> {
-    tokens: Vec<TokenData<'source>>,
-    pos: usize,
+    pub(crate) tokens: Vec<TokenData<'source>>,
+    pub(crate) pos: usize,
 }
 
 impl<'source> TokenStream<'source> {
