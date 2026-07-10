@@ -4,7 +4,6 @@
 
 use crate::context::Context;
 use crate::heap::ManagedObject;
-use std::sync::atomic::Ordering;
 use ys_core::compiler::Value;
 
 /// Produce a human-readable string representation of `val`.
@@ -18,8 +17,8 @@ pub fn stringify_value(ctx: &Context, val: Value) -> String {
         if let Some(Some(obj)) = heap.get(oid as usize) {
             return match &obj.obj {
                 ManagedObject::String(s)     => s.to_string(),
-                ManagedObject::List(elems)   => format_list(ctx, &elems.read()),
-                ManagedObject::Object(fields) => format_object(ctx, &fields.read()),
+                ManagedObject::List(elems)   => format_list(ctx, elems),
+                ManagedObject::Object(fields) => format_object(ctx, fields),
                 ManagedObject::Timestamp(t)  => format!("Timestamp({:?})", t),
                 ManagedObject::Range { start, end, step } => {
                     if *step == 1.0 { format!("{}..{}", start, end) }
@@ -51,24 +50,23 @@ fn format_number(n: f64) -> String {
     }
 }
 
-fn format_list(ctx: &Context, elems: &[std::sync::atomic::AtomicU64]) -> String {
+fn format_list(ctx: &Context, elems: &[Value]) -> String {
     let items: Vec<String> = elems
         .iter()
-        .map(|a| stringify_nested(ctx, Value::from_bits(a.load(Ordering::Relaxed))))
+        .map(|v| stringify_nested(ctx, *v))
         .collect();
     format!("[{}]", items.join(", "))
 }
 
 fn format_object(
     ctx: &Context,
-    fields: &rustc_hash::FxHashMap<u32, std::sync::atomic::AtomicU64>,
+    fields: &rustc_hash::FxHashMap<u32, Value>,
 ) -> String {
     let entries: Vec<String> = fields
         .iter()
         .map(|(&name_id, v)| {
             let name  = ctx.string_pool.get(name_id as usize).map(|s| s.as_ref()).unwrap_or("?");
-            let value = Value::from_bits(v.load(Ordering::Relaxed));
-            format!("{}: {}", name, stringify_nested(ctx, value))
+            format!("{}: {}", name, stringify_nested(ctx, *v))
         })
         .collect();
     format!("{{{}}}", entries.join(", "))

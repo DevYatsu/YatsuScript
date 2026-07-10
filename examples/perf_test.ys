@@ -14,12 +14,5 @@ fn heavy_work ( iterations) {
   }
   fib ( 20)
 }
-let num_tasks : 16
 let iterations : 100000
-mut t : 0
-while t < num_tasks {
-  spawn {
-    heavy_work ( iterations)
-  }
-  t : t + 1
-}
+heavy_work ( iterations)

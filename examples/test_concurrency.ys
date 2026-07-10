@@ -12,10 +12,4 @@ fn check ( id) {
     print ( "OK Task", id)
   }
 }
-mut t : 0
-while t < 10 {
-  spawn {
-    check ( t)
-  }
-  t : t + 1
-}
+check ( 0)

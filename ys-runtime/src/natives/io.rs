@@ -5,7 +5,6 @@ use crate::heap::ManagedObject;
 use crate::value_fmt::stringify_value;
 use rustc_hash::FxHashMap;
 use std::io::Write as _;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use ys_core::compiler::Value;
 use ys_core::error::JitError;
@@ -36,12 +35,7 @@ pub fn register(fns: &mut FxHashMap<String, NativeFn>) {
             if let Some(sso) = Value::sso(&s) {
                 Ok(sso)
             } else {
-                let temp = AtomicU64::new(0);
-                ctx.alloc(ManagedObject::String(Arc::from(s)), &temp);
-                Ok(Value::from_bits(std::sync::atomic::AtomicU64::load(
-                    &temp,
-                    std::sync::atomic::Ordering::Relaxed,
-                )))
+                Ok(ctx.alloc(ManagedObject::String(Arc::from(s))))
             }
         })
     }));

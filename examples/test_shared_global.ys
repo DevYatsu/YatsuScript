@@ -6,20 +6,5 @@ fn task ( id) {
     i : i + 1
   }
 }
-let num : 10
-print ( "Starting", num, "tasks to increment global g...")
-mut t : 0
-while t < num {
-  spawn {
-    task ( t)
-  }
-  t : t + 1
-}
-sleep ( 500)
+task ( 0)
 print ( "Final value of g is", g)
-if g == 10000 {
-  print ( "SUCCESS")
-}
-else {
-  print ( "FAILURE: expected 10000, got", g)
-}

@@ -1,7 +1,7 @@
 use crate::heap::{Heap, ManagedObject};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use ys_core::compiler::Value;
-use parking_lot::Mutex;
 
 //  Backend trait 
 
@@ -35,9 +35,6 @@ pub enum Callable {
     Native(NativeFn),
 }
 
-/// A register array that serves as a GC root for an active task.
-pub type TaskRegisters = Arc<Mutex<Vec<Arc<[std::sync::atomic::AtomicU64]>>>>;
-
 /// The global shared state for a YatsuScript execution environment.
 ///
 /// Contains:
@@ -48,21 +45,16 @@ pub type TaskRegisters = Arc<Mutex<Vec<Arc<[std::sync::atomic::AtomicU64]>>>>;
 pub struct Context {
     pub heap:       Heap,
     pub string_pool: Arc<[Arc<str>]>,
-    pub globals:    Arc<[std::sync::atomic::AtomicU64]>,
+    pub globals:    Arc<[AtomicU64]>,
     pub callables:  rustc_hash::FxHashMap<u32, Callable>,
-    
-    /// Tracks all register arrays currently being used by active tasks
-    /// so the GC can trace them as roots.
-    pub active_registers: Arc<Mutex<Vec<TaskRegisters>>>,
 }
 
 impl Context {
     /// Allocate a new object on the heap, automatically triggering a GC if needed.
     ///
-    /// The `root` argument is a reference to a register slot that will be updated
-    /// if the object is moved during a collection.
-    pub fn alloc(&self, obj: ManagedObject, root: &std::sync::atomic::AtomicU64) {
-        self.heap.alloc(obj, root, self);
+    /// Returns the [`Value`] representing a reference to the new object.
+    pub fn alloc(&self, obj: ManagedObject) -> Value {
+        self.heap.alloc(obj, self)
     }
 
     /// Check if two values are equal, potentially diving into the heap for objects.
@@ -88,17 +80,21 @@ impl Context {
         self.callables.get(&id)
     }
 
-    /// Try to read a value as a string (either SSO or from the heap).
+    /// Try to read a value as a string (SSO, heap, or string pool).
     pub fn value_as_string(&self, v: Value) -> Option<String> {
         if let Some(s) = v.as_sso_str() { 
             return std::str::from_utf8(&s).ok().map(|s| s.to_string());
         }
         if let Some(oid) = v.as_obj_id() {
-            let heap = self.heap.objects.read();
-            if let Some(Some(obj)) = heap.get(oid as usize) {
-                if let ManagedObject::String(s) = &obj.obj {
-                    return Some(s.to_string());
-                }
+            {
+                let heap = self.heap.objects.read();
+                if let Some(Some(obj)) = heap.get(oid as usize)
+                    && let ManagedObject::String(s) = &obj.obj {
+                        return Some(s.to_string());
+                    }
+            }
+            if (oid as usize) < self.string_pool.len() {
+                return Some(self.string_pool[oid as usize].to_string());
             }
         }
         None

@@ -131,14 +131,13 @@ impl LanguageServer for YatsuBackend {
             None    => return Ok(None),
         };
 
-        if let Some(word) = self.get_word_at_pos(&uri, pos) {
-            if let Some(doc) = builtin_docs::get_docs(&word) {
+        if let Some(word) = self.get_word_at_pos(&uri, pos)
+            && let Some(doc) = builtin_docs::get_docs(&word) {
                 return Ok(Some(Hover {
                     contents: HoverContents::Scalar(MarkedString::String(doc)),
                     range: None,
                 }));
             }
-        }
 
         let decl = results.declarations.iter().find(|d| {
             d.range.start.line <= pos.line 
@@ -237,7 +236,6 @@ impl LanguageServer for YatsuBackend {
                 LspTokenVariant::Keyword   => 0,
                 LspTokenVariant::Function  => 1,
                 LspTokenVariant::Variable  => 2,
-                LspTokenVariant::Parameter => 3,
                 LspTokenVariant::Operator  => 4,
                 LspTokenVariant::Comment   => 5,
                 LspTokenVariant::String    => 6,

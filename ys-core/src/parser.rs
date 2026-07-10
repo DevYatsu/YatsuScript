@@ -6,7 +6,7 @@ use crate::{
     unescape::unescape_string,
     token_stream::{TokenStream, VarInfo},
 };
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
@@ -34,10 +34,7 @@ pub struct Parser<'source> {
     next_reg: usize,
     next_global: usize,
 
-    is_in_spawn: bool,
     is_in_function: bool,
-    captures_stack: Vec<FxHashSet<usize>>,
-    spawn_start_regs: Vec<usize>,
     loop_continues: Vec<Vec<usize>>,
 }
 
@@ -52,10 +49,7 @@ impl<'source> Parser<'source> {
             string_map: FxHashMap::default(),
             next_reg: 0,
             next_global: 0,
-            is_in_spawn: false,
             is_in_function: false,
-            captures_stack: Vec::new(),
-            spawn_start_regs: Vec::new(),
             loop_continues: Vec::new(),
             functions: Vec::with_capacity(16),
         })
@@ -285,15 +279,32 @@ impl<'source> Parser<'source> {
                             ));
                         }
                     };
-                    let name_id = self.intern(id);
-                    let dst = self.alloc_reg();
-                    instructions.push(Instruction::ObjectGet {
-                        dst,
-                        obj: current_reg,
-                        name_id,
-                        loc: self.stream.loc(),
-                    });
-                    current_reg = dst;
+                    // Optimize .step(N) on Range: reorder so step loads before Range.
+                    if id == "step" && matches!(self.stream.peek(), Some(Token::LParen)) {
+                        self.stream.advance()?; // consume (
+                        let step_reg = self.parse_expr(instructions)?;
+                        self.stream.expect(Token::RParen)?;
+                        let range_idx = instructions.iter().rposition(|i| matches!(i, Instruction::Range { dst, .. } if *dst == current_reg));
+                        if let Some(idx) = range_idx {
+                            let mut range = instructions.remove(idx);
+                            if let Instruction::Range { step, .. } = &mut range { *step = Some(step_reg); }
+                            instructions.push(range);
+                        } else {
+                            let dst = self.alloc_reg();
+                            instructions.push(Instruction::Range { dst, start: current_reg, end: 0, step: None, loc: self.stream.loc() });
+                            current_reg = dst;
+                        }
+                    } else {
+                        let name_id = self.intern(id);
+                        let dst = self.alloc_reg();
+                        instructions.push(Instruction::ObjectGet {
+                            dst,
+                            obj: current_reg,
+                            name_id,
+                            loc: self.stream.loc(),
+                        });
+                        current_reg = dst;
+                    }
                 }
                 Some(Token::LParen) => {
                     self.stream.advance()?;
@@ -482,8 +493,11 @@ impl<'source> Parser<'source> {
                     return Some(Ok(()));
                 }
                 Token::Spawn => {
-                    self.stream.advance().ok();
-                    return Some(self.parse_spawn_stmt(instructions));
+                    return Some(Err(JitError::parsing(
+                        "spawn is no longer supported".to_string(),
+                        self.stream.loc().line as usize,
+                        self.stream.loc().col as usize,
+                    )));
                 }
                 Token::Identifier(id) => {
                     if self.is_assignment() {
@@ -623,11 +637,10 @@ impl<'source> Parser<'source> {
         self.stream.expect(Token::Colon)?;
 
         // Optimization: x: x + 1  or  x: 1 + x
-        if accessors.is_empty() {
-            if self.try_parse_increment(id, &info, instructions)? {
+        if accessors.is_empty()
+            && self.try_parse_increment(id, &info, instructions)? {
                 return Ok(());
             }
-        }
 
         let src = self.parse_expr(instructions)?;
         if accessors.is_empty() {
@@ -706,7 +719,7 @@ impl<'source> Parser<'source> {
         self.stream.expect(Token::Colon)?;
         let src = self.parse_expr(instructions)?;
 
-        let is_global = !self.is_in_function && !self.is_in_spawn;
+        let is_global = !self.is_in_function;
         let idx = if is_global {
             let i = self.next_global;
             self.next_global += 1;
@@ -751,6 +764,7 @@ impl<'source> Parser<'source> {
         instructions.push(Instruction::Jump(0));
         self.parse_block(instructions)?;
 
+        self.stream.skip_newlines();
         if matches!(self.stream.peek(), Some(Token::Else)) {
             self.stream.advance()?;
             let jump_to_end_idx = instructions.len();
@@ -804,16 +818,43 @@ impl<'source> Parser<'source> {
         self.stream.expect(Token::In)?;
         let iter_val = self.parse_expr(instructions)?;
 
-        let start_reg = self.alloc_reg();
-        let end_reg = self.alloc_reg();
-        let step_reg = self.alloc_reg();
-
-        instructions.push(Instruction::RangeInfo {
-            range: iter_val,
-            start_dst: start_reg,
-            end_dst: end_reg,
-            step_dst: step_reg,
-        });
+        // When the iterator is a Range, avoid the heap allocation + RangeInfo
+        // round-trip by using the component registers directly.
+        // Check if the iterator is a simple Range — extract its registers
+        // and skip the heap allocation + RangeInfo round-trip.
+        let is_range = matches!(instructions.last(), Some(Instruction::Range { dst, .. }) if *dst == iter_val);
+        let (start_reg, end_reg, step_reg) = if is_range {
+            // Read fields from the Range before we pop it.
+            let (s, e, st) = match instructions.last().unwrap() {
+                Instruction::Range { start, end, step, .. } => (*start, *end, *step),
+                _ => unreachable!(),
+            };
+            instructions.pop(); // Remove the Range, avoid heap alloc.
+            let step_reg = match st {
+                Some(sr) => sr,
+                None => {
+                    let sr = self.alloc_reg();
+                    instructions.push(Instruction::LoadLiteral {
+                        dst: sr,
+                        val: Value::number(1.0),
+                    });
+                    sr
+                }
+            };
+            (s, e, step_reg)
+        } else {
+                // Generic path: heap-allocated iterable via RangeInfo.
+                let start_reg = self.alloc_reg();
+                let end_reg = self.alloc_reg();
+                let step_reg = self.alloc_reg();
+                instructions.push(Instruction::RangeInfo {
+                    range: iter_val,
+                    start_dst: start_reg,
+                    end_dst: end_reg,
+                    step_dst: step_reg,
+                });
+                (start_reg, end_reg, step_reg)
+        };
 
         let var_idx = self.alloc_reg();
         self.locals.insert(
@@ -869,31 +910,6 @@ impl<'source> Parser<'source> {
         Ok(())
     }
 
-    fn parse_spawn_stmt(&mut self, instructions: &mut Vec<Instruction>) -> Result<(), JitError> {
-        let old_spawn = self.is_in_spawn;
-        self.is_in_spawn = true;
-        self.captures_stack.push(FxHashSet::default());
-        self.spawn_start_regs.push(self.next_reg);
-
-        let mut body = Vec::new();
-        let regs_at_start = self.next_reg;
-        self.parse_block(&mut body)?;
-
-        let captures_set = self.captures_stack.pop().unwrap();
-        self.spawn_start_regs.pop();
-        self.is_in_spawn = old_spawn;
-
-        let mut captures: Vec<usize> = captures_set.into_iter().collect();
-        captures.sort_unstable();
-
-        instructions.push(Instruction::Spawn(Box::new(crate::compiler::SpawnData {
-            instructions: Arc::from(body),
-            locals_count: self.next_reg.max(regs_at_start),
-            captures: Arc::from(captures),
-        })));
-        Ok(())
-    }
-
     fn parse_fn_decl(&mut self) -> Result<(), JitError> {
         let name = match self.stream.advance()? {
             Token::Identifier(id) => id,
@@ -929,9 +945,8 @@ impl<'source> Parser<'source> {
         self.stream.expect(Token::RParen)?;
 
         let old_locals = std::mem::take(&mut self.locals);
-        let (old_reg, old_spawn, old_func) = (self.next_reg, self.is_in_spawn, self.is_in_function);
+        let (old_reg, old_func) = (self.next_reg, self.is_in_function);
         self.next_reg = 0;
-        self.is_in_spawn = false;
         self.is_in_function = true;
 
         for &p in &params {
@@ -963,7 +978,6 @@ impl<'source> Parser<'source> {
 
         self.locals = old_locals;
         self.next_reg = old_reg;
-        self.is_in_spawn = old_spawn;
         self.is_in_function = old_func;
         Ok(())
     }
@@ -997,18 +1011,7 @@ impl<'source> Parser<'source> {
             });
             r
         } else {
-            self.track_capture(info.idx);
             info.idx
-        }
-    }
-
-    fn track_capture(&mut self, reg: usize) {
-        for i in (0..self.spawn_start_regs.len()).rev() {
-            if reg < self.spawn_start_regs[i] {
-                self.captures_stack[i].insert(reg);
-            } else {
-                break;
-            }
         }
     }
 

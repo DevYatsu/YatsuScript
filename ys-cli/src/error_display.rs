@@ -4,12 +4,12 @@ use ys_core::error::JitError;
 /// Pretty-print a YatsuScript error with syntax highlighting logic.
 pub fn display_error(err: &JitError, source: &str) {
     let (msg, line, col) = match err {
-        JitError::Lexing { err, loc } => (err.to_string(), loc.line as usize, loc.col as usize),
-        JitError::Parsing { msg, loc } => (msg.clone(), loc.line as usize, loc.col as usize),
-        JitError::Runtime { msg, loc } => (msg.clone(), loc.line as usize, loc.col as usize),
-        JitError::UnknownVariable { msg, loc } => (msg.clone(), loc.line as usize, loc.col as usize),
+        JitError::Lexing { err, loc } => (err.to_string(), loc.line, loc.col),
+        JitError::Parsing { msg, loc } => (msg.clone(), loc.line, loc.col),
+        JitError::Runtime { msg, loc } => (msg.clone(), loc.line, loc.col),
+        JitError::UnknownVariable { msg, loc } => (msg.clone(), loc.line, loc.col),
         JitError::RedefinitionOfImmutableVariable { msg, loc, orig_line } => {
-            (format!("{} (already defined on line {})", msg, orig_line), loc.line as usize, loc.col as usize)
+            (format!("{} (already defined on line {})", msg, orig_line), loc.line, loc.col)
         }
     };
 

@@ -12,9 +12,8 @@
 //! *remembered set* via a write barrier.
 
 use parking_lot::{Mutex, RwLock};
-use rayon::prelude::*;
 use rustc_hash::FxHashSet;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use ys_core::compiler::Value;
 
@@ -27,9 +26,9 @@ pub enum ManagedObject {
     /// A heap-allocated string (longer than 6 bytes).
     String(Arc<str>),
     /// A growable list of NaN-boxed values.
-    List(RwLock<Vec<AtomicU64>>),
+    List(Vec<Value>),
     /// A hash map from interned name IDs to NaN-boxed values.
-    Object(RwLock<rustc_hash::FxHashMap<u32, AtomicU64>>),
+    Object(rustc_hash::FxHashMap<u32, Value>),
     /// A point-in-time snapshot (`Instant::now()`).
     Timestamp(std::time::Instant),
     /// An inclusive range with an optional step.
@@ -44,15 +43,15 @@ impl ManagedObject {
     pub fn visit_children<F: FnMut(u32)>(&self, mut f: F) {
         match self {
             ManagedObject::List(elements) => {
-                for v in elements.read().iter() {
-                    if let Some(id) = Value::from_bits(v.load(Ordering::Relaxed)).as_obj_id() {
+                for v in elements.iter() {
+                    if let Some(id) = v.as_obj_id() {
                         f(id);
                     }
                 }
             }
             ManagedObject::Object(fields) => {
-                for v in fields.read().values() {
-                    if let Some(id) = Value::from_bits(v.load(Ordering::Relaxed)).as_obj_id() {
+                for v in fields.values() {
+                    if let Some(id) = v.as_obj_id() {
                         f(id);
                     }
                 }
@@ -131,7 +130,7 @@ impl Heap {
         meta.nursery_ids.clear();
 
         let freed: Vec<u32> = objects
-            .par_iter_mut()
+            .iter_mut()
             .enumerate()
             .filter_map(|(i, slot)| {
                 if let Some(obj) = slot {
@@ -185,7 +184,7 @@ impl Heap {
         // Rebuild the remembered set from tenured objects still pointing at nursery.
         let new_from_old: Vec<u32> = meta
             .remembered_set
-            .par_iter()
+            .iter()
             .filter(|&&id| {
                 objects.get(id as usize)
                     .and_then(|s| s.as_ref())
@@ -197,7 +196,7 @@ impl Heap {
             .collect();
 
         let new_from_promoted: Vec<u32> = promoted
-            .into_par_iter()
+            .into_iter()
             .filter(|&id| {
                 objects.get(id as usize)
                     .and_then(|s| s.as_ref())
@@ -219,20 +218,13 @@ impl Heap {
                 worklist.push(id);
             }
         }
-        let tasks = ctx.active_registers.lock();
-        for task in tasks.iter() {
-            let stack = task.lock();
-            for regs in stack.iter() {
-                for v in regs.iter() {
-                    if let Some(id) = Value::from_bits(v.load(Ordering::Relaxed)).as_obj_id() {
-                        worklist.push(id);
-                    }
-                }
-            }
-        }
+        // Scan the currently-executing task's full call frame stack.
+        // This is far cheaper than per-call task_roots push/pop because GC
+        // runs only every ~100k allocations.
+        crate::vm::scan_current_frames(worklist);
     }
 
-    pub fn alloc(&self, obj: ManagedObject, root: &AtomicU64, ctx: &Context) {
+    pub fn alloc(&self, obj: ManagedObject, ctx: &Context) -> Value {
         if self.alloc_since_gc.fetch_add(1, Ordering::Relaxed) > 100_000 {
             self.collect_garbage(ctx);
         }
@@ -258,7 +250,7 @@ impl Heap {
             generation: Generation::Nursery,
         });
 
-        root.store(Value::object(id).to_bits(), Ordering::Release);
+        Value::object(id)
     }
 
     /// Return `true` when `obj` holds a reference to any nursery-generation object.

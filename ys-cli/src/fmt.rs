@@ -14,14 +14,14 @@ pub fn format_all(input: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut files = Vec::<PathBuf>::new();
 
     if input.is_file() {
-        if input.extension().map_or(false, |ext| ext == "ys") {
+        if input.extension().is_some_and(|ext| ext == "ys") {
             files.push(input.to_path_buf());
         }
     } else {
         for entry in fs::read_dir(input)? {
             let entry = entry?;
             let path  = entry.path();
-            if path.extension().map_or(false, |ext| ext == "ys") {
+            if path.extension().is_some_and(|ext| ext == "ys") {
                 files.push(path);
             }
         }
@@ -38,13 +38,8 @@ pub fn format_all(input: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn format_source(source: &str) -> String {
-    let mut lexer = Token::lexer(source);
-    let mut tokens = Vec::new();
-    while let Some(res) = lexer.next() {
-        if let Ok(t) = res {
-            tokens.push(t);
-        }
-    }
+    let lexer = Token::lexer(source);
+    let tokens: Vec<_> = lexer.flatten().collect();
     format_tokens(&tokens)
 }
 

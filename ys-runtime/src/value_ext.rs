@@ -31,15 +31,20 @@ impl ValueExt for Value {
             for (i, byte) in bytes.iter_mut().enumerate().take(len) {
                 *byte = ((bits >> (i * 8)) & 0xFF) as u8;
             }
-            return std::str::from_utf8(&bytes[..len]).ok().map(|s| f(s));
+            return std::str::from_utf8(&bytes[..len]).ok().map(f);
         }
 
         if let Some(oid) = self.as_obj_id() {
-            let heap = ctx.heap.objects.read();
-            if let Some(Some(obj)) = heap.get(oid as usize)
-                && let crate::heap::ManagedObject::String(s) = &obj.obj
             {
-                return Some(f(s.as_ref()));
+                let heap = ctx.heap.objects.read();
+                if let Some(Some(obj)) = heap.get(oid as usize)
+                    && let crate::heap::ManagedObject::String(s) = &obj.obj
+                {
+                    return Some(f(s.as_ref()));
+                }
+            }
+            if (oid as usize) < ctx.string_pool.len() {
+                return Some(f(&ctx.string_pool[oid as usize]));
             }
         }
 

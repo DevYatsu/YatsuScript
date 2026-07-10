@@ -19,7 +19,7 @@ pub async fn check_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let p = entry.path();
-            if p.extension().map_or(false, |e| e == "ys") {
+            if p.extension().is_some_and(|e| e == "ys") {
                 count += 1;
                 if let Err(e) = check_source_internal(&fs::read_to_string(&p)?, Some(&p)).await {
                     errors += 1;
@@ -64,8 +64,7 @@ pub async fn run_source(source: &str) -> Result<(), Box<dyn std::error::Error>> 
     run_interpreter(program).await?;
     let elapsed_run = start_run.elapsed();
 
-    println!("\n{} {:?} (compile: {:?}, run: {:?})", 
-        "Done in", start.elapsed(), elapsed_compile, elapsed_run);
+    println!("\nDone in {:?} (compile: {:?}, run: {:?})", start.elapsed(), elapsed_compile, elapsed_run);
     
     Ok(())
 }

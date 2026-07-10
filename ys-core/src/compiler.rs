@@ -196,23 +196,12 @@ pub enum Instruction {
     /// Destructure a Range into its start, end, and step components.
     RangeInfo { range: usize, start_dst: usize, end_dst: usize, step_dst: usize },
 
-    //  Concurrency 
-    /// Spawn a new asynchronous Tokio task to execute a block.
-    Spawn(Box<SpawnData>),
-
     //  Control 
     /// Return from the current call frame.
     Return(Option<usize>),
 }
 
 //  Instruction payloads 
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SpawnData {
-    pub instructions: Arc<[Instruction]>,
-    pub locals_count: usize,
-    pub captures:     Arc<[usize]>,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallData {

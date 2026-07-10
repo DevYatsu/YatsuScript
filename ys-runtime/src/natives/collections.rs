@@ -24,8 +24,8 @@ pub fn register(fns: &mut FxHashMap<String, NativeFn>) {
                 if let Some(Some(obj)) = heap.get(oid as usize) {
                     return Ok(Value::number(match &obj.obj {
                         ManagedObject::String(s)  => s.len() as f64,
-                        ManagedObject::List(l)    => l.read().len() as f64,
-                        ManagedObject::Object(o)  => o.read().len() as f64,
+                        ManagedObject::List(l)    => l.len() as f64,
+                        ManagedObject::Object(o)  => o.len() as f64,
                         ManagedObject::Range { start, end, step } => {
                             if *step == 0.0 { 0.0 }
                             else { ((end - start) / step).ceil().max(0.0) }

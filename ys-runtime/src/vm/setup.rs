@@ -3,15 +3,14 @@
 //! Handles setting up the initial [`Context`], registering native functions,
 //! and launching the first call frame (the main module body).
 
-use crate::context::{Callable, Context, TaskRegisters};
+use crate::context::{Callable, Context};
 use crate::heap::{Heap, HeapMetadata};
 use crate::natives;
 use crate::vm::{execute_bytecode, make_registers};
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::sync::atomic::{AtomicU32, AtomicUsize};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::Arc;
-use tokio::task::JoinSet;
 use ys_core::compiler::Program;
 use ys_core::error::JitError;
 
@@ -48,12 +47,11 @@ pub async fn run_interpreter(program: Program) -> Result<(), JitError> {
     // 3. Initialize the shared context.
     let ctx = Arc::new(Context {
         globals: (0..program.globals_count)
-            .map(|_| std::sync::atomic::AtomicU64::new(0))
+            .map(|_| AtomicU64::new(0))
             .collect::<Vec<_>>()
             .into(),
         string_pool: Arc::clone(&program.string_pool),
         callables: callable_map,
-        active_registers: Arc::new(Mutex::new(Vec::with_capacity(64))),
         heap: Heap {
             objects:        RwLock::new(Vec::with_capacity(1024)),
             metadata:       Mutex::new(HeapMetadata {
@@ -66,30 +64,11 @@ pub async fn run_interpreter(program: Program) -> Result<(), JitError> {
         },
     });
 
-    // 4. Setup the main task's register set and JoinSet.
-    let mut join_set = JoinSet::new();
-    let main_regs    = make_registers(program.locals_count);
-    let task_roots: TaskRegisters = Arc::new(Mutex::new(vec![main_regs.clone()]));
-    
-    ctx.active_registers.lock().push(task_roots.clone());
+    // 4. Setup the main task's register set.
+    let main_regs = make_registers(program.locals_count);
 
     // 5. Execute the main bytecode block.
-    execute_bytecode(
-        &program.instructions,
-        ctx.clone(),
-        &mut join_set,
-        main_regs,
-        None,
-        task_roots,
-    )
-    .await?;
-
-    // 6. Wait for all background tasks (spawned blocks) to finish.
-    while let Some(res) = join_set.join_next().await {
-        if let Ok(Err(e)) = res {
-            return Err(e);
-        }
-    }
+    execute_bytecode(&program.instructions, ctx.clone(), main_regs).await?;
 
     Ok(())
 }

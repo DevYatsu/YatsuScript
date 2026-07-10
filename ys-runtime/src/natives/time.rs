@@ -3,7 +3,6 @@
 use crate::context::NativeFn;
 use crate::heap::ManagedObject;
 use rustc_hash::FxHashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use ys_core::compiler::Value;
 use ys_core::error::JitError;
@@ -21,9 +20,7 @@ pub fn register(fns: &mut FxHashMap<String, NativeFn>) {
 
     fns.insert("timestamp".into(), Arc::new(|ctx, _, _| {
         Box::pin(async move {
-            let temp = AtomicU64::new(0);
-            ctx.alloc(ManagedObject::Timestamp(std::time::Instant::now()), &temp);
-            Ok(Value::from_bits(temp.load(Ordering::Relaxed)))
+            Ok(ctx.alloc(ManagedObject::Timestamp(std::time::Instant::now())))
         })
     }));
 

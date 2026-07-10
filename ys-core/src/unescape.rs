@@ -24,11 +24,10 @@ pub fn unescape_string(s: &str) -> String {
                             hex.push(h);
                         }
                     }
-                    if let Ok(n) = u32::from_str_radix(&hex, 16) {
-                        if let Some(uc) = std::char::from_u32(n) {
+                    if let Ok(n) = u32::from_str_radix(&hex, 16)
+                        && let Some(uc) = std::char::from_u32(n) {
                             res.push(uc);
                         }
-                    }
                 }
                 Some(other) => {
                     res.push('\\');

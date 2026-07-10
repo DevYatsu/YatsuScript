@@ -4,13 +4,10 @@ use crate::context::{Callable, NativeFn};
 use crate::heap::ManagedObject;
 use crate::vm::execute_bytecode;
 use crate::value_fmt::stringify_value;
-use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::task::JoinSet;
 use ys_core::compiler::Value;
 use ys_core::error::JitError;
 
@@ -113,23 +110,17 @@ fn register_serve(fns: &mut FxHashMap<String, NativeFn>) {
                                 return;
                             };
 
-                            let registers = make_registers(f.locals_count);
+                            let mut registers = make_registers(f.locals_count);
                             if f.locals_count > 0 {
                                 let val = if let Some(sso) = Value::sso(&req_data) {
                                     sso
                                 } else {
-                                    let temp = AtomicU64::new(0);
-                                    ctx.alloc(ManagedObject::String(Arc::from(req_data.clone())), &temp);
-                                    Value::from_bits(temp.load(Ordering::Relaxed))
+                                    ctx.alloc(ManagedObject::String(Arc::from(req_data.clone())))
                                 };
-                                registers[0].store(val.to_bits(), Ordering::Relaxed);
+                                registers[0] = val;
                             }
 
-                            let mut js     = JoinSet::new();
-                            let t_roots    = Arc::new(Mutex::new(Vec::with_capacity(16)));
-                            ctx.active_registers.lock().push(t_roots.clone());
-
-                            match execute_bytecode(&f.instructions, ctx.clone(), &mut js, registers, None, t_roots).await {
+                            match execute_bytecode(&f.instructions, ctx.clone(), registers).await {
                                 Ok(res) => {
                                     let body = stringify_value(&ctx, res);
                                     let resp = if body.starts_with("HTTP/") {
@@ -160,7 +151,6 @@ fn register_serve(fns: &mut FxHashMap<String, NativeFn>) {
     }));
 }
 
-fn make_registers(count: usize) -> Arc<[AtomicU64]> {
-    let v: Vec<AtomicU64> = (0..count).map(|_| AtomicU64::new(0)).collect();
-    Arc::from(v)
+fn make_registers(count: usize) -> Vec<Value> {
+    vec![Value::from_bits(0); count]
 }
