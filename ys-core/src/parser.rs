@@ -2,6 +2,7 @@ use crate::{
     compiler::{Instruction, Program, UserFunction, Value},
     error::JitError,
     lexer::Token,
+    template::{split_template_parts, TemplatePart},
     token_stream::{TokenStream, VarInfo},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -11,11 +12,6 @@ use std::sync::Arc;
 enum Accessor {
     Index(usize),
     Field(u32),
-}
-
-enum TemplatePart<'source> {
-    Literal(&'source str),
-    Expr(&'source str),
 }
 
 /// The Parser transforms source code into a compiled Program (bytecode).
@@ -178,7 +174,7 @@ impl<'source> Parser<'source> {
                 Ok(r)
             }
             Token::String(s) => {
-                let unescaped = unescape_string(s);
+                let unescaped = crate::unescape::unescape_string(s);
                 let val = Value::sso(&unescaped)
                     .unwrap_or_else(|| Value::object(self.intern(&unescaped)));
                 let r = self.alloc_reg();
@@ -1063,37 +1059,7 @@ impl<'source> Parser<'source> {
         s: &'source str,
         instructions: &mut Vec<Instruction>,
     ) -> Result<usize, JitError> {
-        let mut parts = Vec::new();
-        let mut last = 0;
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
-                if i > last {
-                    parts.push(TemplatePart::Literal(&s[last..i]));
-                }
-                let mut depth = 1;
-                let start = i + 2;
-                i += 2;
-                while i < bytes.len() && depth > 0 {
-                    if bytes[i] == b'{' {
-                        depth += 1;
-                    } else if bytes[i] == b'}' {
-                        depth -= 1;
-                    }
-                    i += 1;
-                }
-                if depth == 0 {
-                    parts.push(TemplatePart::Expr(&s[start..i - 1]));
-                }
-                last = i;
-            } else {
-                i += 1;
-            }
-        }
-        if last < s.len() {
-            parts.push(TemplatePart::Literal(&s[last..]));
-        }
+        let parts = split_template_parts(s);
 
         if parts.is_empty() {
             let r = self.alloc_reg();
@@ -1108,7 +1074,7 @@ impl<'source> Parser<'source> {
         for part in parts {
             let part_reg = match part {
                 TemplatePart::Literal(lit) => {
-                    let unescaped = unescape_string(lit);
+                    let unescaped = crate::unescape::unescape_string(lit);
                     let val = Value::sso(&unescaped)
                         .unwrap_or_else(|| Value::object(self.intern(&unescaped)));
                     let r = self.alloc_reg();
@@ -1166,42 +1132,7 @@ impl<'source> Parser<'source> {
     }
 }
 
-fn unescape_string(s: &str) -> String {
-    let mut res = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => res.push('\n'),
-                Some('r') => res.push('\r'),
-                Some('t') => res.push('\t'),
-                Some('\\') => res.push('\\'),
-                Some('"') => res.push('"'),
-                Some('u') => {
-                    let mut hex = String::with_capacity(4);
-                    for _ in 0..4 {
-                        if let Some(h) = chars.next() {
-                            hex.push(h);
-                        }
-                    }
-                    if let Ok(n) = u32::from_str_radix(&hex, 16)
-                        && let Some(uc) = std::char::from_u32(n)
-                    {
-                        res.push(uc);
-                    }
-                }
-                Some(other) => {
-                    res.push('\\');
-                    res.push(other);
-                }
-                None => res.push('\\'),
-            }
-        } else {
-            res.push(c);
-        }
-    }
-    res
-}
+
 
 #[cfg(test)]
 mod tests {
