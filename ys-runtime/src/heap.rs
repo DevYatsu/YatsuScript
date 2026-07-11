@@ -258,8 +258,8 @@ impl Heap {
 
     fn trace_roots(&self, ctx: &Context, worklist: &mut Vec<u32>) {
         worklist.extend(0..ctx.string_pool.len() as u32);
-        for g in ctx.globals.iter() {
-            if let Some(id) = Value::from_bits(g.load(Ordering::Relaxed)).as_obj_id() {
+        for g in ctx.globals.get().iter() {
+            if let Some(id) = g.as_obj_id() {
                 worklist.push(id);
             }
         }

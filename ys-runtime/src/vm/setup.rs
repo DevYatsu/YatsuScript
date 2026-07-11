@@ -8,9 +8,9 @@ use crate::heap::{Heap, HeapMetadata, SyncCell};
 use crate::natives;
 use crate::vm::{execute_bytecode, make_registers};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicU32, AtomicUsize};
 use std::sync::Arc;
-use ys_core::compiler::Program;
+use ys_core::compiler::{Program, Value};
 use ys_core::error::JitError;
 
 /// Bootstraps the interpreter environment and executes the program.
@@ -45,10 +45,7 @@ pub async fn run_interpreter(program: Program) -> Result<(), JitError> {
 
     // 3. Initialize the shared context.
     let ctx = Arc::new(Context {
-        globals: (0..program.globals_count)
-            .map(|_| AtomicU64::new(0))
-            .collect::<Vec<_>>()
-            .into(),
+        globals: SyncCell::new(vec![Value::from_bits(0); program.globals_count]),
         string_pool: Arc::clone(&program.string_pool),
         callables: callable_map,
         functions:  Arc::clone(&program.functions),

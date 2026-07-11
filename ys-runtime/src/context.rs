@@ -1,5 +1,4 @@
-use crate::heap::{Heap, ManagedObject};
-use std::sync::atomic::AtomicU64;
+use crate::heap::{Heap, ManagedObject, SyncCell};
 use std::sync::Arc;
 use ys_core::compiler::{UserFunction, Value};
 
@@ -45,7 +44,7 @@ pub enum Callable {
 pub struct Context {
     pub heap:       Heap,
     pub string_pool: Arc<[Arc<str>]>,
-    pub globals:    Arc<[AtomicU64]>,
+    pub globals:    SyncCell<Vec<Value>>,
     pub callables:  rustc_hash::FxHashMap<u32, Callable>,
     /// All compiled user-defined functions, indexed by position in the
     /// original `Program.functions` array.

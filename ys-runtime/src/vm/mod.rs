@@ -21,7 +21,7 @@ use std::pin::Pin;
 thread_local! {
     static REG_POOL: RefCell<Vec<Vec<Value>>> = const { RefCell::new(Vec::new()) };
 }
-use std::sync::atomic::Ordering;
+
 use std::sync::Arc;
 use std::future::Future;
 use ys_core::compiler::{Instruction, Loc, Value, QNAN};
@@ -458,13 +458,13 @@ pub fn execute_bytecode<'a>(
                     frames.last_mut().unwrap().pc += 1;
                 }
                 Instruction::LoadGlobal { dst, global } => {
-                    let v = Value::from_bits(ctx.globals[*global].load(Ordering::Relaxed));
+                    let v = ctx.globals.get()[*global];
                     frames.last_mut().unwrap().registers[*dst] = v;
                     frames.last_mut().unwrap().pc += 1;
                 }
                 Instruction::StoreGlobal { global, src } => {
                     let v = frames.last_mut().unwrap().registers[*src];
-                    ctx.globals[*global].store(v.to_bits(), Ordering::Relaxed);
+                    ctx.globals.get_mut()[*global] = v;
                     frames.last_mut().unwrap().pc += 1;
                 }
 
@@ -594,9 +594,9 @@ pub fn execute_bytecode<'a>(
                     frames.last_mut().unwrap().pc += 1;
                 }
                 Instruction::IncrementGlobal(global) => {
-                    let v = Value::from_bits(ctx.globals[*global].load(Ordering::Relaxed));
+                    let v = ctx.globals.get()[*global];
                     if let Some(n) = v.as_number() {
-                        ctx.globals[*global].store(Value::number(n + 1.0).to_bits(), Ordering::Relaxed);
+                        ctx.globals.get_mut()[*global] = Value::number(n + 1.0);
                     }
                     frames.last_mut().unwrap().pc += 1;
                 }
