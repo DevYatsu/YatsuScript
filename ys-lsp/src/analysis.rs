@@ -62,9 +62,9 @@ pub fn analyze_source(source: &str) -> AnalysisResults {
             Ok(token) => {
                 // Classify token for semantic highlighting.
                 let variant = match &token {
-                    Token::Fn | Token::MutableVar | Token::ImmutableVar | Token::Return 
-                    | Token::Continue | Token::If | Token::Else | Token::Spawn 
-                    | Token::For | Token::While | Token::In 
+                    Token::Fun | Token::Return | Token::Continue | Token::If | Token::Else
+                    | Token::For | Token::While | Token::In | Token::Use | Token::Super
+                    | Token::Exp | Token::Move | Token::And | Token::Or
                         => LspTokenVariant::Keyword,
                     
                     Token::Identifier(_) => LspTokenVariant::Variable,
@@ -85,7 +85,7 @@ pub fn analyze_source(source: &str) -> AnalysisResults {
 
                 // Identify declarations.
                 match token {
-                    Token::Fn => {
+                    Token::Fun => {
                         if let Some(Ok(Token::Identifier(name))) = lexer.next() {
                             let s = lexer.span();
                             let p = get_pos(s.start);
@@ -96,23 +96,6 @@ pub fn analyze_source(source: &str) -> AnalysisResults {
                             });
                             results.tokens.push(LspToken { 
                                 variant: LspTokenVariant::Function, 
-                                line: p.line, 
-                                char: p.character, 
-                                len: (s.end - s.start) as u32 
-                            });
-                        }
-                    }
-                    Token::MutableVar | Token::ImmutableVar => {
-                        if let Some(Ok(Token::Identifier(name))) = lexer.next() {
-                            let s = lexer.span();
-                            let p = get_pos(s.start);
-                            results.declarations.push(Declaration {
-                                name: name.to_string(),
-                                kind: SymbolKind::VARIABLE,
-                                range: Range::new(p, get_pos(s.end)),
-                            });
-                            results.tokens.push(LspToken { 
-                                variant: LspTokenVariant::Variable, 
                                 line: p.line, 
                                 char: p.character, 
                                 len: (s.end - s.start) as u32 
