@@ -230,6 +230,7 @@ impl Yatsu {
             &program.instructions,
             Arc::clone(&self.ctx),
             registers,
+            0,
         )?;  // sync
 
         R::from_lua(result, &self.ctx)

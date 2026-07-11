@@ -69,6 +69,8 @@ pub enum ManagedObject {
     BoundMethod { receiver: Value, name_id: u32 },
     /// A closure bundling a function index with captured values.
     Closure(Closure),
+    /// A Promise — used by async/await (JS-style).
+    Promise(crate::vm::PromiseState),
 }
 
 impl ManagedObject {
@@ -97,6 +99,24 @@ impl ManagedObject {
                 for v in cl.captures.iter() {
                     if let Some(id) = v.as_obj_id() {
                         f(id);
+                    }
+                }
+            }
+            ManagedObject::Promise(state) => {
+                match state {
+                    crate::vm::PromiseState::Resolved(v) => {
+                        if let Some(id) = v.as_obj_id() {
+                            f(id);
+                        }
+                    }
+                    crate::vm::PromiseState::Pending { continuation } => {
+                        if let Some(frame) = continuation {
+                            for v in frame.registers.iter() {
+                                if let Some(id) = v.as_obj_id() {
+                                    f(id);
+                                }
+                            }
+                        }
                     }
                 }
             }

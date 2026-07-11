@@ -324,9 +324,11 @@ impl Codegen {
                 self.compile_func(name, params, body, *loc);
                 Ok(0)
             }
-            AstNode::Await(expr, _) => {
-                // For now, just compile the inner expression (synchronous fallback)
-                self.compile_node(expr)
+            AstNode::Await(expr, loc) => {
+                let promise_reg = self.compile_node(expr)?;
+                let dst = self.alloc_reg();
+                self.emit(Instruction::Await { dst, promise: promise_reg, loc: *loc });
+                Ok(dst)
             }
 
             // ── Calls ────────────────────────────────────────────────────────

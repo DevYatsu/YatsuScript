@@ -35,6 +35,7 @@ pub fn stringify_value(ctx: &Context, val: Value) -> String {
                 ManagedObject::Closure(cl) => {
                     format!("<Closure#{}>", cl.name_id)
                 }
+                ManagedObject::Promise(_) => "<Promise>".into(),
             };
         }
         return "null".into();
@@ -89,6 +90,7 @@ fn stringify_nested(ctx: &Context, val: Value) -> String {
                 ManagedObject::Range { .. }   => "Range(...)".into(),
                 ManagedObject::BoundMethod { .. } => "BoundMethod(...)".into(),
                 ManagedObject::Closure(_)       => "Closure(...)".into(),
+                ManagedObject::Promise(_)       => "Promise(...)".into(),
             };
         }
         return "null".into();

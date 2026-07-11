@@ -368,8 +368,21 @@ impl InstrPtr {
     fn slice(&self) -> &[Instruction] { unsafe { &*self.0 } }
 }
 
-struct ReturnTarget {
-    dst: usize,
+#[derive(Clone, Copy)]
+pub struct ReturnTarget {
+    pub dst: usize,
+}
+
+pub struct FrameState {
+    pub instructions: Arc<[Instruction]>,
+    pub registers:    Vec<Value>,
+    pub pc:           usize,
+    pub return_to:    Option<ReturnTarget>,
+}
+
+pub enum PromiseState {
+    Pending { continuation: Option<Box<FrameState>> },
+    Resolved(Value),
 }
 
 struct CallFrame {
@@ -411,14 +424,14 @@ pub fn execute_bytecode(
     instructions: &Arc<[Instruction]>,
     ctx:          Arc<Context>,
     registers:    Vec<Value>,
+    start_pc:     usize,
 ) -> Result<Value, JitError> {
 // ── Frame stack ───────────────────────────────────────────────────
         let mut frames = vec![CallFrame {
             instructions: InstrPtr::from_arc(instructions),
             registers,
-            pc: 0,
+            pc: start_pc,
             return_to: None,
-            
         }];
         set_current_frames(&frames);
 
@@ -499,6 +512,40 @@ pub fn execute_bytecode(
                         continue;
                     }
                     return Ok(ret);
+                }
+
+                Instruction::Await { dst, promise, loc: _loc } => {
+                    let pv = frames[fi].registers[*promise];
+                    if let Some(oid) = pv.as_obj_id() {
+                        let mut resolved_val = None;
+                        {
+                            let objects = ctx.heap.objects.get();
+                            if let Some(Some(obj)) = objects.get(oid as usize) {
+                                if let ManagedObject::Promise(PromiseState::Resolved(v)) = &obj.obj {
+                                    resolved_val = Some(*v);
+                                }
+                            }
+                        }
+                        if let Some(val) = resolved_val {
+                            frames[fi].registers[*dst] = val;
+                            frames[fi].pc += 1;
+                        } else {
+                            let saved_pc = frames[fi].pc;
+                            let frame = frames.pop().unwrap();
+                            let saved = PromiseState::Pending {
+                                continuation: Some(Box::new(FrameState {
+                                    instructions: frame.instructions.slice().to_vec().into(),
+                                    registers: frame.registers.clone(),
+                                    pc: saved_pc,
+                                    return_to: frame.return_to,
+                                })),
+                            };
+                            return Ok(ctx.alloc(ManagedObject::Promise(saved)));
+                        }
+                    } else {
+                        frames[fi].registers[*dst] = pv;
+                        frames[fi].pc += 1;
+                    }
                 }
 
                 // ── Arithmetic ────────────────────────────────────────────

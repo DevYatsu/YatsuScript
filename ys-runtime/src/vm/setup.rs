@@ -77,7 +77,7 @@ pub fn run_interpreter(program: Program) -> Result<(), JitError> {
     let main_regs = make_registers(program.locals_count);
 
     // 5. Execute the main bytecode block.
-    execute_bytecode(&program.instructions, ctx.clone(), main_regs)?;
+    execute_bytecode(&program.instructions, ctx.clone(), main_regs, 0)?;
 
     Ok(())
 }

@@ -198,7 +198,7 @@ impl Context {
         for (i, v) in args.iter().enumerate() {
             registers[cl.captures.len() + i] = *v;
         }
-        crate::vm::execute_bytecode(&func.instructions, Arc::clone(ctx), registers)
+        crate::vm::execute_bytecode(&func.instructions, Arc::clone(ctx), registers, 0)
 }
 
 }

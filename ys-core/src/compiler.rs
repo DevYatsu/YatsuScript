@@ -222,6 +222,8 @@ pub enum Instruction {
     //  Control 
     /// Return from the current call frame.
     Return(Option<usize>),
+    /// Await a Promise — yields to the event loop if pending.
+    Await { dst: usize, promise: usize, loc: Loc },
 }
 
 //  Instruction payloads 

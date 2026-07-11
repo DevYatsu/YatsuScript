@@ -114,7 +114,7 @@ fn handle_connection(mut stream: TcpStream, ctx: &Arc<Context>, handler_name: &s
         registers[0] = val;
     }
 
-    match execute_bytecode(&f.instructions, Arc::clone(ctx), registers) {
+    match execute_bytecode(&f.instructions, Arc::clone(ctx), registers, 0) {
         Ok(res) => {
             let body = stringify_value(ctx, res);
             let resp = if body.starts_with("HTTP/") {
