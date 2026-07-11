@@ -335,6 +335,106 @@ impl Yatsu {
         });
     }
 
+    // ── Module system ─────────────────────────────────────────────────────────
+
+    /// Register a module containing multiple named functions.
+    ///
+    /// Modules are stored as global objects whose properties are callable
+    /// functions.  Scripts access them as `module_name.func(args)`.
+    ///
+    /// ```
+    /// ys.register_module("math", |m| {
+    ///     m.register("sin", |_, args| Ok(Value::number(args[0].as_number().unwrap().sin())));
+    ///     m.register("cos", |_, args| Ok(Value::number(args[0].as_number().unwrap().cos())));
+    /// });
+    /// // From script: math.sin(1.57)
+    /// ```
+    pub fn register_module(&mut self, name: &str, f: impl FnOnce(&mut ModuleBuilder)) {
+        let mut builder = ModuleBuilder {
+            functions: Vec::new(),
+        };
+        f(&mut builder);
+
+        // Build the module as a heap Object, storing each function as a
+        // Value reference (via callables_by_name under a qualified name).
+        let mut fields = Vec::new();
+        for (func_name, nf) in builder.functions {
+            let qualified = format!("{}::{}", name, func_name);
+            self.ctx.callables_by_name.get_mut().insert(qualified.clone(), Callable::Native(Arc::clone(&nf)));
+            // Store the qualified name as an SSO string in the module object
+            let name_id = {
+                let pool = &self.ctx.string_pool;
+                let mut id = pool.len() as u32;
+                for (i, s) in pool.iter().enumerate() {
+                    if s.as_ref() == qualified.as_str() { id = i as u32; break; }
+                }
+                id
+            };
+            // The value is the qualified name as a string (will dispatch via
+            // CallDynamic which resolves strings to callables_by_name)
+            let val = Value::sso(&qualified)
+                .unwrap_or_else(|| self.ctx.alloc(
+                    crate::heap::ManagedObject::String(Arc::from(qualified))));
+            fields.push((name_id, val));
+        }
+        // Store the module object at a global slot
+        let module_obj = self.ctx.alloc(crate::heap::ManagedObject::Object(
+            fields.into_iter().collect::<rustc_hash::FxHashMap<_, _>>()));
+        // Set as a global
+        let globals = self.ctx.globals.get_mut();
+        // Find existing or append
+        let mut found = None;
+        for (i, g) in globals.iter().enumerate() {
+            if let Some(s) = g.as_sso_str() {
+                if &s[..name.len()] == name.as_bytes() {
+                    found = Some(i);
+                    break;
+                }
+            }
+        }
+        if let Some(idx) = found {
+            globals[idx] = module_obj;
+        } else {
+            globals.push(module_obj);
+        }
+    }
+}
+
+/// Helper to collect functions for [`Yatsu::register_module`].
+pub struct ModuleBuilder {
+    functions: Vec<(String, crate::context::NativeFn)>,
+}
+
+impl ModuleBuilder {
+    /// Register a function within this module.
+    pub fn register<F>(&mut self, name: &str, f: F)
+    where
+        F: Fn(&Context, &[Value]) -> Result<Value, JitError> + Send + Sync + 'static,
+    {
+        let wrapped = Arc::new(f);
+        let nf: crate::context::NativeFn = Arc::new(move |ctx, args, loc| {
+            let w = Arc::clone(&wrapped);
+            Box::pin(async move { w(&ctx, &args) })
+        });
+        self.functions.push((name.to_string(), nf));
+    }
+
+    /// Typed variant — see [`Yatsu::register_fn`].
+    pub fn register_fn<A, R>(&mut self, name: &str, f: impl Fn(A) -> Result<R, JitError> + Send + Sync + 'static)
+    where
+        A: FromLuaSlice + Send + 'static,
+        R: ToLua + Send + 'static,
+    {
+        let func_name = name.to_string();
+        self.register(name, move |ctx, args| {
+            let params = A::from_lua_slice(args, &func_name, ctx)?;
+            let result = f(params)?;
+            result.to_lua(ctx)
+        });
+    }
+}
+
+impl Yatsu {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     fn ensure_global(&self, name: &str) -> usize {
