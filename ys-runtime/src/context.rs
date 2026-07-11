@@ -1,6 +1,7 @@
-use crate::heap::{Heap, ManagedObject, SyncCell};
+use crate::heap::{Closure, Heap, ManagedObject, SyncCell};
 use std::sync::Arc;
-use ys_core::compiler::{UserFunction, Value};
+use ys_core::compiler::{Loc, UserFunction, Value};
+use ys_core::error::JitError;
 
 //  Backend trait 
 
@@ -108,5 +109,62 @@ impl Context {
             return self.string_pool.iter().position(|p| &**p == s_str).map(|i| i as u32);
         }
         None
+    }
+
+    /// Call a closure value with the given arguments.
+    ///
+    /// Native functions should pass their `&ctx` (an `&Arc<Context>`) as the first argument.
+    /// Returns the closure's return value.
+    pub async fn call_closure(
+        ctx: &Arc<Self>,
+        closure_val: Value,
+        args: Vec<Value>,
+        loc: Loc,
+    ) -> Result<Value, JitError> {
+        let oid = closure_val
+            .as_obj_id()
+            .ok_or_else(|| JitError::runtime("Expected a closure", loc.line as usize, loc.col as usize))?;
+        let cl = {
+            let objects = ctx.heap.objects.get();
+            let o = objects
+                .get(oid as usize)
+                .and_then(|o| o.as_ref())
+                .ok_or_else(|| {
+                    JitError::runtime("Expected a closure", loc.line as usize, loc.col as usize)
+                })?;
+            match &o.obj {
+                ManagedObject::Closure(Closure { func_index, captures }) => crate::heap::Closure {
+                    func_index: *func_index,
+                    captures: captures.clone(),
+                },
+                _ => {
+                    return Err(JitError::runtime(
+                        "Expected a closure",
+                        loc.line as usize,
+                        loc.col as usize,
+                    ))
+                }
+            }
+        };
+        let func = &ctx.functions[cl.func_index as usize];
+        let total_params = cl.captures.len() + args.len();
+        if total_params != func.params_count {
+            return Err(JitError::runtime(
+                format!(
+                    "Closure arity mismatch: expected {}, got {}",
+                    func.params_count, total_params
+                ),
+                loc.line as usize,
+                loc.col as usize,
+            ));
+        }
+        let mut registers = vec![Value::from_bits(0); func.locals_count];
+        for (i, v) in cl.captures.iter().enumerate() {
+            registers[i] = *v;
+        }
+        for (i, v) in args.iter().enumerate() {
+            registers[cl.captures.len() + i] = *v;
+        }
+        crate::vm::execute_bytecode(&func.instructions, Arc::clone(ctx), registers).await
     }
 }
