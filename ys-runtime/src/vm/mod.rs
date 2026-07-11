@@ -428,7 +428,7 @@ pub fn execute_bytecode<'a>(
 
             let fi = frames.len() - 1;
 
-            // Implicit return at end of frame (fi is safe here — no pop yet).
+            // Implicit return at end of frame.
             if frames[fi].pc >= frames[fi].instr_slice().len() {
                 let frame    = frames.pop().unwrap();
                 let ret_val  = Value::from_bits(0);
