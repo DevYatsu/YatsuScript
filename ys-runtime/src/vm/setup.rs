@@ -53,8 +53,8 @@ pub async fn run_interpreter(program: Program) -> Result<(), JitError> {
     let ctx = Arc::new(Context {
         globals: SyncCell::new(vec![Value::from_bits(0); program.globals_count]),
         string_pool: Arc::clone(&program.string_pool),
-        callables: callable_map,
-        callables_by_name,
+        callables: SyncCell::new(callable_map),
+        callables_by_name: SyncCell::new(callables_by_name),
         heap: Heap {
             objects:        SyncCell::new(Vec::with_capacity(1024)),
             metadata:       SyncCell::new(HeapMetadata {

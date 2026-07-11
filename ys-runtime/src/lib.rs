@@ -11,6 +11,7 @@
 
 pub mod context;
 pub mod heap;
+pub mod yatsu;
 pub mod natives;
 pub mod value_ext;
 pub mod vm;

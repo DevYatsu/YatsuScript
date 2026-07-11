@@ -50,11 +50,31 @@ pub struct Context {
     pub heap:       Heap,
     pub string_pool: Arc<[Arc<str>]>,
     pub globals:    SyncCell<Vec<Value>>,
-    pub callables:  rustc_hash::FxHashMap<u32, Callable>,
-    pub callables_by_name: FxHashMap<String, Callable>,
+    pub callables:  SyncCell<rustc_hash::FxHashMap<u32, Callable>>,
+    pub callables_by_name: SyncCell<FxHashMap<String, Callable>>,
 }
 
 impl Context {
+    /// Create a fresh context with an empty heap and no callables.
+    pub fn new() -> Self {
+        Self {
+            heap: Heap {
+                objects:        SyncCell::new(Vec::with_capacity(256)),
+                metadata:       SyncCell::new(crate::heap::HeapMetadata {
+                    free_list:      Vec::with_capacity(32),
+                    nursery_ids:    Vec::with_capacity(256),
+                    remembered_set: rustc_hash::FxHashSet::default(),
+                }),
+                gc_count:       SyncCell::new(0),
+                alloc_since_gc: SyncCell::new(0),
+            },
+            string_pool:       std::sync::Arc::from(vec![std::sync::Arc::from("")]),
+            globals:           SyncCell::new(Vec::new()),
+            callables:         SyncCell::new(rustc_hash::FxHashMap::default()),
+            callables_by_name: SyncCell::new(rustc_hash::FxHashMap::default()),
+        }
+    }
+
     /// Allocate a new object on the heap, automatically triggering a GC if needed.
     ///
     /// Returns the [`Value`] representing a reference to the new object.
@@ -82,12 +102,12 @@ impl Context {
 
     /// Retrieve a callable — first by name_id (fast path), then by string name.
     pub fn get_callable(&self, id: u32) -> Option<&Callable> {
-        self.callables.get(&id)
+        self.callables.get().get(&id)
     }
 
     /// Retrieve a callable by its string name (primary API for embedding).
     pub fn get_callable_by_name(&self, name: &str) -> Option<&Callable> {
-        self.callables_by_name.get(name)
+        self.callables_by_name.get().get(name)
     }
 
     /// Register a native function so scripts can call it by name.
@@ -99,7 +119,7 @@ impl Context {
         Fut: Future<Output = Result<Value, JitError>> + Send + 'static,
     {
         let nf: NativeFn = Arc::new(move |ctx, args, loc| Box::pin(f(ctx, args, loc)));
-        self.callables_by_name.insert(name.to_string(), Callable::Native(Arc::clone(&nf)));
+        self.callables_by_name.get_mut().insert(name.to_string(), Callable::Native(Arc::clone(&nf)));
     }
 
     /// Try to read a value as a string (SSO, heap, or string pool).
