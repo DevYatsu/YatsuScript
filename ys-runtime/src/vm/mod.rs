@@ -608,6 +608,12 @@ pub fn execute_bytecode<'a>(
                         ctx.alloc(ManagedObject::List(elems));
                     frames.last_mut().unwrap().pc += 1;
                 }
+                Instruction::NewListFrom { dst, elems } => {
+                    let vals: Vec<Value> = elems.iter().map(|&r| frames.last_mut().unwrap().registers[r]).collect();
+                    frames.last_mut().unwrap().registers[*dst] =
+                        ctx.alloc(ManagedObject::List(vals));
+                    frames.last_mut().unwrap().pc += 1;
+                }
                 Instruction::ListGet { dst, list, index_reg, loc } => {
                     match handle_list_get(&frames.last_mut().unwrap().registers, *list, *index_reg, &ctx, *loc) {
                         GetResult::Value(v) => frames.last_mut().unwrap().registers[*dst] = v,
@@ -625,6 +631,16 @@ pub fn execute_bytecode<'a>(
                 Instruction::NewObject { dst, .. } => {
                     frames.last_mut().unwrap().registers[*dst] =
                         ctx.alloc(ManagedObject::Object(rustc_hash::FxHashMap::default()));
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                Instruction::NewObjectFrom { dst, fields } => {
+                    let mut map = rustc_hash::FxHashMap::default();
+                    map.reserve(fields.len());
+                    for &(name_id, src) in fields.iter() {
+                        map.insert(name_id, frames.last_mut().unwrap().registers[src]);
+                    }
+                    frames.last_mut().unwrap().registers[*dst] =
+                        ctx.alloc(ManagedObject::Object(map));
                     frames.last_mut().unwrap().pc += 1;
                 }
                 Instruction::ObjectGet { dst, obj, name_id, loc } => {

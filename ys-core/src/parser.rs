@@ -376,21 +376,12 @@ impl<'source> Parser<'source> {
         self.stream.expect(Token::RBracket)?;
 
         let dst = self.alloc_reg();
-        instructions.push(Instruction::NewList {
-            dst,
-            len: elements.len(),
-        });
-        for (i, &src) in elements.iter().enumerate() {
-            let index_reg = self.alloc_reg();
-            instructions.push(Instruction::LoadLiteral {
-                dst: index_reg,
-                val: Value::number(i as f64),
-            });
-            instructions.push(Instruction::ListSet {
-                list: dst,
-                index_reg,
-                src,
-                loc: self.stream.loc(),
+        if elements.is_empty() {
+            instructions.push(Instruction::NewList { dst, len: 0 });
+        } else {
+            instructions.push(Instruction::NewListFrom {
+                dst,
+                elems: Arc::from(elements),
             });
         }
         Ok(dst)
@@ -432,17 +423,15 @@ impl<'source> Parser<'source> {
         self.stream.expect(Token::RBrace)?;
 
         let dst = self.alloc_reg();
-        instructions.push(Instruction::NewObject {
-            dst,
-            capacity: fields.len(),
-        });
-        for (name, src) in fields {
-            let name_id = self.intern(name);
-            instructions.push(Instruction::ObjectSet {
-                obj: dst,
-                name_id,
-                src,
-                loc: self.stream.loc(),
+        if fields.is_empty() {
+            instructions.push(Instruction::NewObject { dst, capacity: 0 });
+        } else {
+            let pairs: Vec<(u32, usize)> = fields.into_iter()
+                .map(|(name, src)| (self.intern(name), src))
+                .collect();
+            instructions.push(Instruction::NewObjectFrom {
+                dst,
+                fields: Arc::from(pairs),
             });
         }
         Ok(dst)

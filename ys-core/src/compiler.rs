@@ -177,12 +177,18 @@ pub enum Instruction {
     //  Collections 
     /// Create a new list object on the heap with an initial element count.
     NewList { dst: usize, len: usize },
+    /// Create a list from pre‑evaluated element registers (list literal).
+    /// Replaces the pattern `NewList` + N×(`LoadLiteral` + `ListSet`).
+    NewListFrom { dst: usize, elems: Arc<[usize]> },
     /// Read an element from a list.
     ListGet { dst: usize, list: usize, index_reg: usize, loc: Loc },
     /// Write an element to a list.
     ListSet { list: usize, index_reg: usize, src: usize, loc: Loc },
     /// Create a new object (hash map) on the heap.
     NewObject { dst: usize, capacity: usize },
+    /// Create an object from pre‑evaluated name→value pairs (object literal).
+    /// Replaces the pattern `NewObject` + N×`ObjectSet`.
+    NewObjectFrom { dst: usize, fields: Arc<[(u32, usize)]> },
     /// Read a property from an object by interned name ID.
     ObjectGet { dst: usize, obj: usize, name_id: u32, loc: Loc },
     /// Write a property to an object by interned name ID.
