@@ -151,6 +151,8 @@ pub enum Instruction {
     JumpIfNotLess { var: usize, end: usize, target: usize },
 
     //  Arithmetic ─
+    /// Add numbers (no NaN check — both operands MUST be plain f64).
+    AddNum { dst: usize, lhs: usize, rhs: usize },
     /// Add numbers or concatenate strings.
     Add { dst: usize, lhs: usize, rhs: usize, loc: Loc },
     /// Subtract two numbers.

@@ -503,6 +503,13 @@ pub fn execute_bytecode<'a>(
                 }
 
                 // ── Arithmetic ────────────────────────────────────────────
+                Instruction::AddNum { dst, lhs, rhs } => {
+                    frames[fi].registers[*dst] = Value::number(
+                        f64::from_bits(frames[fi].registers[*lhs].to_bits()) +
+                        f64::from_bits(frames[fi].registers[*rhs].to_bits())
+                    );
+                    frames[fi].pc += 1;
+                }
                 Instruction::Add { dst, lhs, rhs, loc } => {
                     let lv = frames[fi].registers[*lhs];
                     let rv = frames[fi].registers[*rhs];

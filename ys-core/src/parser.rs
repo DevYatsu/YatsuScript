@@ -1028,7 +1028,7 @@ impl<'source> Parser<'source> {
                     let dst = self.alloc_reg();
                     match op {
                         Token::Plus => {
-                            Instruction::Add { dst, lhs, rhs, loc }
+                            Instruction::AddNum { dst, lhs, rhs }
                         }
                         Token::Minus => {
                             Instruction::Sub { dst, lhs, rhs, loc }
@@ -1041,7 +1041,8 @@ impl<'source> Parser<'source> {
             instructions.push(instr);
             lhs = if let Some(ins) = instructions.last() {
                 match ins {
-                    Instruction::Add { dst, .. } | Instruction::Sub { dst, .. } => *dst,
+                    Instruction::AddNum { dst, .. } | Instruction::Add { dst, .. }
+                    | Instruction::Sub { dst, .. } => *dst,
                     _ => unreachable!(),
                 }
             } else {
