@@ -791,41 +791,141 @@ pub fn execute_bytecode<'a>(
                                     continue;
                                 }
 
-                            // ── List method dispatch (map / filter / reduce) ──
+                            // ── List method dispatch (all 18 methods) ──
                             if let Some(list_oid) = receiver.as_obj_id() {
-                                let maybe_list = {
+                                let elems = {
                                     let objects = ctx.heap.objects.get();
                                     objects.get(list_oid as usize)
                                         .and_then(|o| o.as_ref())
-                                        .map(|o| &o.obj)
-                                        .and_then(|obj| if let ManagedObject::List(elems) = obj { Some(elems.clone()) } else { None })
+                                        .and_then(|o| if let ManagedObject::List(elems) = &o.obj { Some(elems.clone()) } else { None })
                                 };
-                                if let Some(elems) = maybe_list {
+                                if let Some(elems) = elems {
                                     let args_regs = &*box_data.args_regs;
-                                    let closure_val = args_regs.first().map(|&r| frames[fi].registers[r]).unwrap_or(Value::from_bits(0));
-                                    let result = if method == "map" {
-                                        let mut out = Vec::with_capacity(elems.len());
-                                        for v in elems {
-                                            let v = crate::context::Context::call_closure(&ctx, closure_val, vec![v], loc).await?;
-                                            out.push(v);
+                                    let read = |i: usize| args_regs.get(i).map(|&r| frames[fi].registers[r]).unwrap_or(Value::from_bits(0));
+                                    let result = match method {
+                                        "map" => {
+                                            let mut out = Vec::with_capacity(elems.len());
+                                            for v in elems {
+                                                out.push(crate::context::Context::call_closure(&ctx, read(0), vec![v], loc).await?);
+                                            }
+                                            ctx.alloc(ManagedObject::List(out))
                                         }
-                                        ctx.alloc(ManagedObject::List(out))
-                                    } else if method == "filter" {
-                                        let mut out = Vec::new();
-                                        for v in elems {
-                                            let keep = crate::context::Context::call_closure(&ctx, closure_val, vec![v], loc).await?;
-                                            if keep.is_truthy() { out.push(v); }
+                                        "filter" => {
+                                            let mut out = Vec::new();
+                                            for v in elems {
+                                                if crate::context::Context::call_closure(&ctx, read(0), vec![v], loc).await?.is_truthy() { out.push(v); }
+                                            }
+                                            ctx.alloc(ManagedObject::List(out))
                                         }
-                                        ctx.alloc(ManagedObject::List(out))
-                                    } else if method == "reduce" && args_regs.len() >= 2 {
-                                        let initial = frames[fi].registers[args_regs[0]];
-                                        let closure_val = frames[fi].registers[args_regs[1]];
-                                        let mut acc = initial;
-                                        for v in elems {
-                                            acc = crate::context::Context::call_closure(&ctx, closure_val, vec![acc, v], loc).await?;
+                                        "reduce" if args_regs.len() >= 2 => {
+                                            let init = read(0);
+                                            let cl = read(1);
+                                            let mut acc = init;
+                                            for v in elems {
+                                                acc = crate::context::Context::call_closure(&ctx, cl, vec![acc, v], loc).await?;
+                                            }
+                                            acc
                                         }
-                                        acc
-                                    } else { frames[fi].pc += 1; continue; };
+                                        "each" => {
+                                            for v in elems { crate::context::Context::call_closure(&ctx, read(0), vec![v], loc).await?; }
+                                            receiver
+                                        }
+                                        "find" => {
+                                            let mut found = Value::from_bits(0);
+                                            for v in elems {
+                                                if crate::context::Context::call_closure(&ctx, read(0), vec![v], loc).await?.is_truthy() { found = v; break; }
+                                            }
+                                            found
+                                        }
+                                        "some" => {
+                                            let mut r = Value::bool(false);
+                                            for v in elems {
+                                                if crate::context::Context::call_closure(&ctx, read(0), vec![v], loc).await?.is_truthy() { r = Value::bool(true); break; }
+                                            }
+                                            r
+                                        }
+                                        "every" => {
+                                            let mut r = Value::bool(true);
+                                            for v in elems {
+                                                if !crate::context::Context::call_closure(&ctx, read(0), vec![v], loc).await?.is_truthy() { r = Value::bool(false); break; }
+                                            }
+                                            r
+                                        }
+                                        "flat_map" => {
+                                            let mut out = Vec::new();
+                                            for v in elems {
+                                                let mapped = crate::context::Context::call_closure(&ctx, read(0), vec![v], loc).await?;
+                                                if let Some(oid) = mapped.as_obj_id() {
+                                                    let objects = ctx.heap.objects.get();
+                                                    if let Some(ManagedObject::List(inner)) = objects.get(oid as usize).and_then(|o| o.as_ref()).map(|o| &o.obj) {
+                                                        out.extend_from_slice(inner); continue;
+                                                    }
+                                                }
+                                                out.push(mapped);
+                                            }
+                                            ctx.alloc(ManagedObject::List(out))
+                                        }
+                                        "includes" => Value::bool(elems.iter().any(|v| v.to_bits() == read(0).to_bits())),
+                                        "index_of" => Value::number(elems.iter().position(|v| v.to_bits() == read(0).to_bits()).map(|i| i as f64).unwrap_or(-1.0)),
+                                        "sorted" => {
+                                            let mut e = elems;
+                                            for i in 1..e.len() {
+                                                let mut j = i;
+                                                while j > 0 {
+                                                    let (a, b) = (e[j-1].as_number(), e[j].as_number());
+                                                    if let (Some(a), Some(b)) = (a, b) { if a <= b { break; } e.swap(j-1, j); } else { break; }
+                                                    j -= 1;
+                                                }
+                                            }
+                                            ctx.alloc(ManagedObject::List(e))
+                                        }
+                                        "reversed" => ctx.alloc(ManagedObject::List(elems.into_iter().rev().collect())),
+                                        "slice" => {
+                                            let s = read(0).as_number().unwrap_or(0.0) as usize;
+                                            let e = read(1).as_number().map(|n| n as usize).unwrap_or(elems.len());
+                                            let (s, e) = (s.min(elems.len()), e.min(elems.len()));
+                                            ctx.alloc(ManagedObject::List(elems[s..e].to_vec()))
+                                        }
+                                        "concat" => {
+                                            let mut e = elems;
+                                            if let Some(oid) = read(0).as_obj_id() {
+                                                let objects = ctx.heap.objects.get();
+                                                if let Some(ManagedObject::List(other)) = objects.get(oid as usize).and_then(|o| o.as_ref()).map(|o| &o.obj) {
+                                                    e.extend_from_slice(other);
+                                                }
+                                            }
+                                            ctx.alloc(ManagedObject::List(e))
+                                        }
+                                        "flatten" => {
+                                            let mut out = Vec::new();
+                                            for v in elems {
+                                                if let Some(oid) = v.as_obj_id() {
+                                                    let objects = ctx.heap.objects.get();
+                                                    if let Some(ManagedObject::List(inner)) = objects.get(oid as usize).and_then(|o| o.as_ref()).map(|o| &o.obj) {
+                                                        out.extend_from_slice(inner); continue;
+                                                    }
+                                                }
+                                                out.push(v);
+                                            }
+                                            ctx.alloc(ManagedObject::List(out))
+                                        }
+                                        "take" => {
+                                            let n = read(0).as_number().unwrap_or(0.0) as usize;
+                                            ctx.alloc(ManagedObject::List(elems[..n.min(elems.len())].to_vec()))
+                                        }
+                                        "drop" => {
+                                            let n = read(0).as_number().unwrap_or(0.0) as usize;
+                                            ctx.alloc(ManagedObject::List(elems[n.min(elems.len())..].to_vec()))
+                                        }
+                                        "unique" => {
+                                            let mut out = Vec::with_capacity(elems.len());
+                                            for v in elems {
+                                                if !out.iter().any(|x: &Value| x.to_bits() == v.to_bits()) { out.push(v); }
+                                            }
+                                            ctx.alloc(ManagedObject::List(out))
+                                        }
+                                        _ => { frames[fi].pc += 1; continue; }
+                                    };
                                     if let Some(d) = dst { frames[fi].registers[d] = result; }
                                     frames[fi].pc += 1;
                                     continue;
