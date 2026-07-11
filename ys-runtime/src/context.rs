@@ -63,7 +63,7 @@ impl Context {
 
         match (a.as_obj_id(), b.as_obj_id()) {
             (Some(aid), Some(bid)) => {
-                let heap = self.heap.objects.read();
+                let heap = self.heap.objects.get();
                 if let (Some(Some(ao)), Some(Some(bo))) = (heap.get(aid as usize), heap.get(bid as usize)) {
                     match (&ao.obj, &bo.obj) {
                         (ManagedObject::String(asrc), ManagedObject::String(bsrc)) => asrc == bsrc,
@@ -86,12 +86,10 @@ impl Context {
             return std::str::from_utf8(&s).ok().map(|s| s.to_string());
         }
         if let Some(oid) = v.as_obj_id() {
-            {
-                let heap = self.heap.objects.read();
-                if let Some(Some(obj)) = heap.get(oid as usize)
-                    && let ManagedObject::String(s) = &obj.obj {
-                        return Some(s.to_string());
-                    }
+            let heap = self.heap.objects.get();
+            if let Some(Some(obj)) = heap.get(oid as usize)
+                && let ManagedObject::String(s) = &obj.obj {
+                    return Some(s.to_string());
             }
             if (oid as usize) < self.string_pool.len() {
                 return Some(self.string_pool[oid as usize].to_string());

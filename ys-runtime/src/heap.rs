@@ -10,14 +10,40 @@
 //! scans nursery objects; a major collection (every 5th GC) scans everything.
 //! Tenured objects that hold references to nursery objects are tracked in the
 //! *remembered set* via a write barrier.
+//!
+//! # Thread safety
+//!
+//! With spawn removed, the heap is only accessed by a single task at a time.
+//! Locks are replaced with `SyncCell` — a safe `UnsafeCell` wrapper for
+//! single-threaded-but-shared interior mutability.
 
-use parking_lot::{Mutex, RwLock};
+use std::cell::UnsafeCell;
 use rustc_hash::FxHashSet;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use ys_core::compiler::Value;
 
 use crate::context::Context;
+
+// ── SyncCell: single-threaded interior mutability ─────────────────────────
+
+/// Interior-mutability cell for single-threaded contexts shared behind `Arc`.
+///
+/// Like `UnsafeCell` but `Sync` so it can live in an `Arc<Context>`.
+/// Safe because spawn is removed — only one task runs at a time.
+#[repr(transparent)]
+pub struct SyncCell<T>(UnsafeCell<T>);
+unsafe impl<T: Send> Sync for SyncCell<T> {}
+unsafe impl<T: Send> Send for SyncCell<T> {}
+
+impl<T> SyncCell<T> {
+    #[inline(always)]
+    pub fn new(val: T) -> Self { Self(UnsafeCell::new(val)) }
+    #[inline(always)]
+    pub fn get(&self) -> &T { unsafe { &*self.0.get() } }
+    #[inline(always)]
+    pub fn get_mut(&self) -> &mut T { unsafe { &mut *self.0.get() } }
+}
 
 // ── Object variants ───────────────────────────────────────────────────────────
 
@@ -78,25 +104,29 @@ pub struct HeapObject {
     pub generation: Generation,
 }
 
+// ── GC bookkeeping ───────────────────────────────────────────────────────────
+
+/// GC bookkeeping data.
+pub struct HeapMetadata {
+    pub free_list:      Vec<u32>,
+    pub nursery_ids:    Vec<u32>,
+    pub remembered_set: FxHashSet<u32>,
+}
+
 // ── Heap ────
 
 /// The managed object store with a generational GC.
+///
+/// **Single-threaded only.** All fields are accessed directly without locks.
 pub struct Heap {
     /// All allocated objects (indexed by u32 object ID).
-    pub objects:       RwLock<Vec<Option<HeapObject>>>,
+    pub objects:       SyncCell<Vec<Option<HeapObject>>>,
     /// GC bookkeeping (free list, nursery set, remembered set).
-    pub metadata:      Mutex<HeapMetadata>,
+    pub metadata:      SyncCell<HeapMetadata>,
     /// Running count of GC cycles — every 5th triggers a major collection.
     pub gc_count:      AtomicU32,
     /// Allocations since the last GC (triggers GC at 100 000).
     pub alloc_since_gc: AtomicUsize,
-}
-
-/// GC bookkeeping data, kept separate so it can be lock-guarded independently.
-pub struct HeapMetadata {
-    pub free_list:     Vec<u32>,
-    pub nursery_ids:   Vec<u32>,
-    pub remembered_set: FxHashSet<u32>,
 }
 
 impl Heap {
@@ -112,7 +142,7 @@ impl Heap {
 
     /// Scan all live objects and free anything not reachable from roots.
     pub fn major_gc(&self, gc_id: u32, ctx: &Context) {
-        let mut objects  = self.objects.write();
+        let objects  = self.objects.get_mut();
         let mut worklist = Vec::new();
         self.trace_roots(ctx, &mut worklist);
 
@@ -125,7 +155,7 @@ impl Heap {
             }
         }
 
-        let mut meta = self.metadata.lock();
+        let meta = self.metadata.get_mut();
         meta.remembered_set.clear();
         meta.nursery_ids.clear();
 
@@ -148,11 +178,11 @@ impl Heap {
 
     /// Scan only nursery objects and objects in the remembered set.
     pub fn minor_gc(&self, gc_id: u32, ctx: &Context) {
-        let mut objects  = self.objects.write();
+        let objects  = self.objects.get_mut();
         let mut worklist = Vec::new();
         self.trace_roots(ctx, &mut worklist);
         {
-            let meta = self.metadata.lock();
+            let meta = self.metadata.get();
             worklist.extend(meta.remembered_set.iter());
         }
 
@@ -165,7 +195,7 @@ impl Heap {
             }
         }
 
-        let mut meta        = self.metadata.lock();
+        let meta        = self.metadata.get_mut();
         let mut promoted    = Vec::new();
         let nursery_ids: Vec<u32> = meta.nursery_ids.drain(..).collect();
 
@@ -189,7 +219,7 @@ impl Heap {
                 objects.get(id as usize)
                     .and_then(|s| s.as_ref())
                     .map(|o| o.generation == Generation::Tenured
-                             && self.points_to_nursery(o, &objects))
+                             && self.points_to_nursery(o, objects))
                     .unwrap_or(false)
             })
             .copied()
@@ -200,7 +230,7 @@ impl Heap {
             .filter(|&id| {
                 objects.get(id as usize)
                     .and_then(|s| s.as_ref())
-                    .map(|o| self.points_to_nursery(o, &objects))
+                    .map(|o| self.points_to_nursery(o, objects))
                     .unwrap_or(false)
             })
             .collect();
@@ -219,8 +249,6 @@ impl Heap {
             }
         }
         // Scan the currently-executing task's full call frame stack.
-        // This is far cheaper than per-call task_roots push/pop because GC
-        // runs only every ~100k allocations.
         crate::vm::scan_current_frames(worklist);
     }
 
@@ -229,11 +257,11 @@ impl Heap {
             self.collect_garbage(ctx);
         }
 
-        let mut meta = self.metadata.lock();
+        let meta = self.metadata.get_mut();
         let id = match meta.free_list.pop() {
             Some(i) => i,
             None => {
-                let mut objects = self.objects.write();
+                let objects = self.objects.get_mut();
                 let i = objects.len() as u32;
                 objects.push(None);
                 i
@@ -241,9 +269,9 @@ impl Heap {
         };
 
         meta.nursery_ids.push(id);
-        drop(meta);
+        // Drop the metadata borrow before objects.
 
-        let mut objects = self.objects.write();
+        let objects = self.objects.get_mut();
         objects[id as usize] = Some(HeapObject {
             obj,
             last_gc_id: 0,

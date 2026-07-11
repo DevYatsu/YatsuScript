@@ -4,10 +4,9 @@
 //! and launching the first call frame (the main module body).
 
 use crate::context::{Callable, Context};
-use crate::heap::{Heap, HeapMetadata};
+use crate::heap::{Heap, HeapMetadata, SyncCell};
 use crate::natives;
 use crate::vm::{execute_bytecode, make_registers};
-use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::Arc;
@@ -53,8 +52,8 @@ pub async fn run_interpreter(program: Program) -> Result<(), JitError> {
         string_pool: Arc::clone(&program.string_pool),
         callables: callable_map,
         heap: Heap {
-            objects:        RwLock::new(Vec::with_capacity(1024)),
-            metadata:       Mutex::new(HeapMetadata {
+            objects:        SyncCell::new(Vec::with_capacity(1024)),
+            metadata:       SyncCell::new(HeapMetadata {
                 free_list:      Vec::with_capacity(128),
                 nursery_ids:    Vec::with_capacity(1024),
                 remembered_set: FxHashSet::default(),

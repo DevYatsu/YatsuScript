@@ -13,7 +13,7 @@ pub fn stringify_value(ctx: &Context, val: Value) -> String {
     if let Some(s) = ctx.value_as_string(val) { return s; }
 
     if let Some(oid) = val.as_obj_id() {
-        let heap = ctx.heap.objects.read();
+        let heap = ctx.heap.objects.get();
         if let Some(Some(obj)) = heap.get(oid as usize) {
             return match &obj.obj {
                 ManagedObject::String(s)     => s.to_string(),
@@ -76,7 +76,7 @@ fn format_object(
 fn stringify_nested(ctx: &Context, val: Value) -> String {
     if let Some(s) = ctx.value_as_string(val) { return format!("\"{}\"", s); }
     if let Some(oid) = val.as_obj_id() {
-        let heap = ctx.heap.objects.read();
+        let heap = ctx.heap.objects.get();
         if let Some(Some(obj)) = heap.get(oid as usize) {
             return match &obj.obj {
                 ManagedObject::String(s)      => format!("\"{}\"", s),

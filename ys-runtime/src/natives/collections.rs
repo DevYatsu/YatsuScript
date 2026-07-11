@@ -20,7 +20,7 @@ pub fn register(fns: &mut FxHashMap<String, NativeFn>) {
             let val = *val;
 
             if let Some(oid) = val.as_obj_id() {
-                let heap = ctx.heap.objects.read();
+                let heap = ctx.heap.objects.get();
                 if let Some(Some(obj)) = heap.get(oid as usize) {
                     return Ok(Value::number(match &obj.obj {
                         ManagedObject::String(s)  => s.len() as f64,

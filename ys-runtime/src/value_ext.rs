@@ -36,7 +36,7 @@ impl ValueExt for Value {
 
         if let Some(oid) = self.as_obj_id() {
             {
-                let heap = ctx.heap.objects.read();
+                let heap = ctx.heap.objects.get();
                 if let Some(Some(obj)) = heap.get(oid as usize)
                     && let crate::heap::ManagedObject::String(s) = &obj.obj
                 {
