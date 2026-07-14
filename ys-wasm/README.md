@@ -1,15 +1,15 @@
-# YatsuScript WASM
+# ysc WASM
 
-YatsuScript language interpreter compiled to WebAssembly. Run `.ys` scripts in the browser with full `print()` capture, AST inspection, and bytecode disassembly.
+ysc language interpreter compiled to WebAssembly. Run `.ys` scripts in the browser with full `print()` capture, AST inspection, and bytecode disassembly.
 
 ## Quick Start
 
 ```bash
-npm install yatsuscript
+npm install ysc-wasm
 ```
 
 ```js
-import init, { _eval, _parseAst, _disassemble } from 'yatsuscript';
+import init, { _eval, _parseAst, _disassemble } from 'ysc-wasm';
 
 await init();
 
@@ -33,7 +33,7 @@ console.log(bc.main);
 
 ### `_eval(source: string): EvalResult`
 
-Compile and run YatsuScript code. Captures all `print()` output.
+Compile and run ysc code. Captures all `print()` output.
 
 ```ts
 interface EvalResult {
@@ -98,7 +98,7 @@ cd ys-wasm && bash build.sh
 ## Examples
 
 ```js
-import init, { _eval } from 'yatsuscript';
+import init, { _eval } from 'ysc-wasm';
 
 await init();
 

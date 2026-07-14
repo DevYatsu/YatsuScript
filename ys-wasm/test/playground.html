@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>YatsuScript Playground</title>
+<title>ysc Playground</title>
 <link rel="icon" href="data:,">
 
 <!-- Monaco Editor from CDN -->
@@ -93,7 +93,7 @@
       <span class="tab" id="tabBytecode">Bytecode</span>
     </div>
     <div class="output-content">
-      <pre id="output">Welcome to YatsuScript!
+      <pre id="output">Welcome to ysc!
 
 Write code in the editor and press ▶ Run.</pre>
       <pre id="astView" style="display:none; color:#ce9178; font-size:12px"></pre>
@@ -105,7 +105,7 @@ Write code in the editor and press ▶ Run.</pre>
 
 <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
 <script>
-// ── Monarch tokenizer: YatsuScript syntax highlighting ──────────
+// ── Monarch tokenizer: ysc syntax highlighting ──────────
 const yatsuLanguage = {
   defaultToken: '',
   tokenPostfix: '.ys',
@@ -230,13 +230,13 @@ require.config({
 });
 
 require(['vs/editor/editor.main'], async function () {
-  // Register YatsuScript language
-  monaco.languages.register({ id: 'yatsuscript' });
-  monaco.languages.setMonarchTokensProvider('yatsuscript', yatsuLanguage);
+  // Register ysc language
+  monaco.languages.register({ id: "ysc" });
+  monaco.languages.setMonarchTokensProvider("ysc", yatsuLanguage);
   // Create editor
   editor = monaco.editor.create(document.getElementById('editor-container'), {
     value: DEFAULT_SOURCE,
-    language: 'yatsuscript',
+    language: "ysc",
     theme: 'vs-dark',
     fontSize: 14,
     lineNumbers: 'on',
@@ -248,7 +248,7 @@ require(['vs/editor/editor.main'], async function () {
   });
 
   // ── Autocomplete ────────────────────────────────────
-  monaco.languages.registerCompletionItemProvider('yatsuscript', {
+  monaco.languages.registerCompletionItemProvider("ysc", {
     provideCompletionItems: (model, position) => {
       const word = model.getWordUntilPosition(position);
       const range = {
@@ -290,7 +290,7 @@ require(['vs/editor/editor.main'], async function () {
   });
 
   // ── Hover provider ──────────────────────────────────
-  monaco.languages.registerHoverProvider('yatsuscript', {
+  monaco.languages.registerHoverProvider("ysc", {
     provideHover: (model, position) => {
       const w = model.getWordAtPosition(position);
       if (!w) return null;

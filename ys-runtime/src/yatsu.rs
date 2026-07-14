@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //! ```
-//! use yatsuscript::Yatsu;
+//! use ysc::{Yatsu, ysc};
 //!
 //! let yatsu = Yatsu::new();
 //! yatsu.register("add", |_, args| {
@@ -179,7 +179,7 @@ pub type NativeCallback = Arc<dyn Fn(&Context, &[Value]) -> Result<Value, JitErr
 
 //  Yatsu
 
-/// High‑level embedding API for YatsuScript, inspired by `mlua`.
+/// High‑level embedding API for ysc, inspired by `mlua`.
 pub struct Yatsu {
     /// The underlying execution context.
     pub ctx:   Arc<Context>,
@@ -188,7 +188,7 @@ pub struct Yatsu {
 }
 
 impl Yatsu {
-    /// Create a new YatsuScript state with an empty heap and no globals.
+    /// Create a new ysc state with an empty heap and no globals.
     pub fn new() -> Self {
         Self {
             ctx: Arc::new(Context::new()),

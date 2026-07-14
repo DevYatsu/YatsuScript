@@ -61,7 +61,7 @@ fn generate_hints(err: &JitError, source: &str) -> Vec<Hint> {
         JitError::Lexing { .. } => vec![],
         JitError::UnknownVariable { msg, .. } => unknown_var_hints(msg, source),
         JitError::RedefinitionOfImmutableVariable { msg: _, loc: _, orig_line } => vec![
-            Hint { message: "Variables can be reassigned in YatsuScript".into(), kind: HintKind::Note },
+            Hint { message: "Variables can be reassigned in ysc".into(), kind: HintKind::Note },
             Hint { message: format!("Originally defined on line {}", orig_line), kind: HintKind::Location },
         ],
     }
@@ -392,7 +392,7 @@ fn build_display(err: &JitError, source: &str) -> DisplayError {
                 ys_core::lexer::LexingError::InvalidFloat =>
                     ("invalid float literal", "Floating-point overflow or malformed literal.".into()),
                 ys_core::lexer::LexingError::NonAsciiCharacter(c) =>
-                    ("non-ASCII character", format!("YatsuScript only supports ASCII source files. Character '{}' is not valid.", c)),
+                    ("non-ASCII character", format!("ysc only supports ASCII source files. Character '{}' is not valid.", c)),
                 ys_core::lexer::LexingError::Other =>
                     ("unknown lexer error", "An unrecognised character or token was encountered.".into()),
             };

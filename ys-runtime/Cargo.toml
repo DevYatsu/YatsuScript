@@ -2,7 +2,7 @@
 name        = "ys-runtime"
 version     = "0.1.0"
 edition     = "2024"
-description = "YatsuScript execution engine: register VM, generational GC, heap, and native functions."
+description = "ysc execution engine: register VM, generational GC, heap, and native functions."
 license     = "MIT"
 
 [features]

@@ -141,7 +141,7 @@ impl Context {
 
     /// Register a native function so scripts can call it by name.
     ///
-    /// This is the primary API for embedding YatsuScript in games and apps.
+    /// This is the primary API for embedding ysc in games and apps.
     pub fn register_sync(&mut self, name: &str, f: impl Fn(&Arc<Context>, &[Value]) -> Result<Value, JitError> + Send + Sync + 'static) {
         self.callables_by_name.get_mut().insert(name.to_string(), Callable::Native(Arc::new(f)));
     }

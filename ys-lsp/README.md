@@ -1,8 +1,8 @@
-# yatsuscript-lsp
+# ysc-lsp
 
 > A full Language Server Protocol (LSP) implementation for the YatsuScript programming language.
 
-`yatsuscript-lsp` makes YatsuScript feel like a modern, professional language by providing IDE features like intelligent highlighting, real-time diagnostics, and documentation hover.
+`ysc-lsp` makes YatsuScript feel like a modern, professional language by providing IDE features like intelligent highlighting, real-time diagnostics, and documentation hover.
 
 ## Features
 
@@ -26,18 +26,18 @@
 ### Installation
 
 ```bash
-cargo build -p yatsuscript-lsp
+cargo build -p ysc-lsp
 ```
 
 ### Editor Integration
 
 #### Visual Studio Code
 
-Point your client-side LSP configuration to the `yatsuscript-lsp` binary. For example, using the `vscode-lsp-client` extension:
+Point your client-side LSP configuration to the `ysc-lsp` binary. For example, using the `vscode-lsp-client` extension:
 
 ```json
 {
-    "yatsuscript.serverPath": "/path/to/yatsuscript-lsp"
+    "yatsuscript.serverPath": "/path/to/ysc-lsp"
 }
 ```
 
@@ -49,7 +49,7 @@ Add this to your `init.lua` (using `nvim-lspconfig`):
 local configs = require('lspconfig.configs')
 configs.yatsuscript = {
     default_config = {
-        cmd = { 'yatsuscript-lsp' },
+        cmd = { 'ysc-lsp' },
         filetypes = { 'ys', 'yatsuscript' },
         root_dir = function(fname)
             return lspconfig.util.find_git_ancestor(fname) or vim.loop.os_homedir()

@@ -1,6 +1,6 @@
-//! # yatsuscript-lsp
+//! # ysc-lsp
 //!
-//! Language Server Protocol implementation for the YatsuScript scripting language.
+//! Language Server Protocol implementation for the ysc scripting language.
 
 mod analysis;
 mod backend;

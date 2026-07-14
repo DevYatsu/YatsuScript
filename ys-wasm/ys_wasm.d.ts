@@ -1,4 +1,4 @@
-/* ── YatsuScript WASM API ────────────────────────────── */
+/* ── ysc WASM API ────────────────────────────── */
 
 /** A single print() output line. */
 export interface PrintLine {

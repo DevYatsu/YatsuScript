@@ -72,7 +72,7 @@ pub fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
     let mut rl = rustyline::DefaultEditor::new()?;
     let _runtime = Interpreter;
 
-    println!("YatsuScript REPL (press Ctrl-C to exit)");
+    println!("ysc REPL (press Ctrl-C to exit)");
     
     loop {
         let readline = rl.readline(">> ");

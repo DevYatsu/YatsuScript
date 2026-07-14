@@ -1,7 +1,7 @@
 {
-  "name": "yatsuscript",
-  "displayName": "YatsuScript support for VS Code",
-  "description": "Powerful editor support for YatsuScript language using the built-in LSP.",
+  "name": "ysc",
+  "displayName": "ysc support for VS Code",
+  "description": "Powerful editor support for ysc language using the built-in LSP.",
   "version": "0.1.0",
   "publisher": "Yanis",
   "engines": {
@@ -17,26 +17,26 @@
   "contributes": {
     "languages": [
       {
-        "id": "yatsuscript",
-        "aliases": ["YatsuScript", "yatsuscript"],
+        "id": "ysc",
+        "aliases": ["ysc"],
         "extensions": [".ys"],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "yatsuscript",
-        "scopeName": "source.yatsuscript",
-        "path": "./syntaxes/yatsuscript.tmLanguage.json"
+        "language": "ysc",
+        "scopeName": "source.ysc",
+        "path": "./syntaxes/ysc.tmLanguage.json"
       }
     ],
     "configuration": {
       "title": "YatsuScript",
       "properties": {
-        "yatsuscript.serverPath": {
+        "ysc.serverPath": {
           "type": "string",
-          "default": "yatsuscript-lsp",
-          "description": "Absolute path to the yatsuscript-lsp binary or command name if in PATH."
+          "default": "ysc-lsp",
+          "description": "Absolute path to the ysc-lsp binary or command name if in PATH."
         }
       }
     }

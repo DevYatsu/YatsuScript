@@ -2,7 +2,7 @@
 name    = "ys-lsp"
 version = "0.1.0"
 edition = "2024"
-description = "Language Server Protocol implementation for the YatsuScript scripting language"
+description = "Language Server Protocol implementation for the ysc scripting language"
 license = "MIT"
 
 [[bin]]

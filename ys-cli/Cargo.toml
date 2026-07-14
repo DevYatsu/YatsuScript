@@ -2,7 +2,7 @@
 name        = "ys-cli"
 version     = "0.1.0"
 edition     = "2024"
-description = "YatsuScript CLI: runner, REPL, and code formatter."
+description = "ysc CLI: runner, REPL, and code formatter."
 license     = "MIT"
 
 [[bin]]

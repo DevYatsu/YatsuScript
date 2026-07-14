@@ -106,7 +106,7 @@ impl LanguageServer for YatsuBackend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client.log_message(MessageType::INFO, "YatsuScript LSP server initialized").await;
+        self.client.log_message(MessageType::INFO, "ysc LSP server initialized").await;
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {

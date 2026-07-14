@@ -8,7 +8,7 @@ mod error_display;
 #[derive(Parser)]
 #[command(name = "ysc")]
 #[command(version)]
-#[command(about = "YatsuScript CLI: runner, REPL, and code formatter.")]
+#[command(about = "ysc CLI: runner, REPL, and code formatter.")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
