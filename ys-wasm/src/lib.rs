@@ -3,220 +3,20 @@
 #![cfg(target_arch = "wasm32")]
 
 use wasm_bindgen::prelude::*;
-
-/// A structured result returned by all WASM functions.
-#[wasm_bindgen]
-pub struct YsResult {
-    success: bool,
-    output: String,
-    error: String,
-}
-
-#[wasm_bindgen]
-impl YsResult {
-    pub fn ok(output: String) -> Self {
-        Self { success: true, output, error: String::new() }
-    }
-    pub fn err(msg: String) -> Self {
-        Self { success: false, output: String::new(), error: msg }
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn success(&self) -> bool { self.success }
-    #[wasm_bindgen(getter)]
-    pub fn output(&self) -> String { self.output.clone() }
-    #[wasm_bindgen(getter)]
-    pub fn error(&self) -> String { self.error.clone() }
-}
+use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════
-//  AST parser
+//  Eval — run code, return print lines as structured list
 // ═══════════════════════════════════════════════════════════════
 
-/// Parse source code and return its AST as a formatted string.
-#[wasm_bindgen(js_name = _parseAst)]
-pub fn parse_ast(source: &str) -> YsResult {
-    std::panic::catch_unwind(|| {
-        let mut parser = match ys_core::ast_parser::AstParser::new(source) {
-            Ok(p) => p,
-            Err(e) => return YsResult::err(e.to_string()),
-        };
-        match parser.parse_program() {
-            Ok(ast) => YsResult::ok(format_ast_block(&ast, 0)),
-            Err(e) => YsResult::err(e.to_string()),
-        }
-    })
-    .unwrap_or_else(|_| YsResult::err("Panic during AST parsing".into()))
-}
-
-fn format_ast_block(block: &[ys_core::ast::AstNode], depth: usize) -> String {
-    let indent = "  ".repeat(depth);
-    let mut out = String::new();
-    out.push_str(&format!("{}[\n", indent));
-    for node in block {
-        out.push_str(&format_ast_node(node, depth + 1));
-        out.push_str(",\n");
-    }
-    out.push_str(&format!("{}]", indent));
-    out
-}
-
-fn format_ast_node(node: &ys_core::ast::AstNode, depth: usize) -> String {
-    use ys_core::ast::*;
-    let indent = "  ".repeat(depth);
-    match node {
-        AstNode::Number(n, _) => format!("{}Num({})", indent, n),
-        AstNode::Bool(b, _) => format!("{}Bool({})", indent, b),
-        AstNode::Nil(_) => format!("{}Nil", indent),
-        AstNode::Str(s, _) => format!("{}Str({:?})", indent, s),
-        AstNode::Ident(s, _) => format!("{}Ident({})", indent, s),
-        AstNode::Assign { target, value, .. } =>
-            format!("{}Assign(\n{}  target: {},\n{}  value: {},\n{})",
-                indent, indent, format_ast_node(target, depth+2),
-                indent, format_ast_node(value, depth+2), indent),
-        AstNode::Binary { op, lhs, rhs, .. } =>
-            format!("{}Binary({:?},\n{}  {},\n{}  {})",
-                indent, op, indent, format_ast_node(lhs, depth+2),
-                indent, format_ast_node(rhs, depth+2)),
-        AstNode::Unary { op, expr, .. } =>
-            format!("{}Unary({:?}, {})", indent, op, format_ast_node(expr, depth+1)),
-        AstNode::Block(stmts, _) => format_ast_block(stmts, depth),
-        AstNode::If { cond, then_block, else_block, .. } => {
-            let mut s = format!("{}If(\n{}  cond: {},\n", indent, indent, format_ast_node(cond, depth+2));
-            s.push_str(&format!("{}  then: {},\n", indent, format_ast_block(then_block, depth+2)));
-            if !else_block.is_empty() {
-                s.push_str(&format!("{}  else: {},\n", indent, format_ast_block(else_block, depth+2)));
-            }
-            s.push_str(&format!("{})", indent)); s
-        }
-        AstNode::While { cond, body, .. } =>
-            format!("{}While(\n{}  cond: {},\n{}  body: {},\n{})",
-                indent, indent, format_ast_node(cond, depth+2),
-                indent, format_ast_block(body, depth+2), indent),
-        AstNode::For { var, iter, body, .. } =>
-            format!("{}For({},\n{}  iter: {},\n{}  body: {},\n{})",
-                indent, var, indent, format_ast_node(iter, depth+2),
-                indent, format_ast_block(body, depth+2), indent),
-        AstNode::Return { value, .. } => match value {
-            Some(v) => format!("{}Ret({})", indent, format_ast_node(v, depth+1)),
-            None => format!("{}Ret", indent),
-        },
-        AstNode::Yield(v, _) => format!("{}Yield({})", indent, format_ast_node(v, depth+1)),
-        AstNode::FunCall { name, args, .. } => {
-            let a: Vec<_> = args.iter().map(|a| format_ast_node(a, depth+1)).collect();
-            format!("{}Call({}, [{}])", indent, name, a.join(", "))
-        }
-        AstNode::MethodCall { obj, method, args, .. } => {
-            let a: Vec<_> = args.iter().map(|a| format_ast_node(a, depth+1)).collect();
-            format!("{}MethodCall({}.{}({}))", indent, format_ast_node(obj, depth+2), method, a.join(", "))
-        }
-        AstNode::DynamicCall { callee, args, .. } => {
-            let a: Vec<_> = args.iter().map(|a| format_ast_node(a, depth+1)).collect();
-            format!("{}DynCall({}, [{}])", indent, format_ast_node(callee, depth+2), a.join(", "))
-        }
-        AstNode::FunDecl { name, params, body, .. } =>
-            format!("{}Fun({}({}) {})", indent, name, params.join(", "), format_ast_block(body, depth+1)),
-        AstNode::Closure { params, body, .. } =>
-            format!("{}Closure(|{}| {})", indent, params.join(", "), format_ast_node(body, depth+1)),
-        AstNode::ListLit(elems, _) => {
-            let a: Vec<_> = elems.iter().map(|e| format_ast_node(e, depth+1)).collect();
-            format!("{}List[{}]", indent, a.join(", "))
-        }
-        AstNode::ObjectLit(fields, _) => {
-            let a: Vec<_> = fields.iter().map(|(k, v)| format!("{}: {}", k, format_ast_node(v, depth+1))).collect();
-            format!("{}Obj{{{}}}", indent, a.join(", "))
-        }
-        AstNode::Index { obj, index, .. } =>
-            format!("{}Index({}, {})", indent, format_ast_node(obj, depth+2), format_ast_node(index, depth+2)),
-        AstNode::Field { obj, name, .. } =>
-            format!("{}Field({}.{})", indent, format_ast_node(obj, depth+2), name),
-        AstNode::Range { start, end, step, .. } => match step {
-            Some(s) => format!("{}Range({}..{}.step({}))", indent,
-                format_ast_node(start, depth+2), format_ast_node(end, depth+2), format_ast_node(s, depth+2)),
-            None => format!("{}Range({}..{})", indent,
-                format_ast_node(start, depth+2), format_ast_node(end, depth+2)),
-        },
-        AstNode::Await(expr, _) => format!("{}Await({})", indent, format_ast_node(expr, depth+1)),
-        AstNode::AsyncFun { name, params, body, .. } =>
-            format!("{}AsyncFun({}({}) {})", indent, name, params.join(", "), format_ast_block(body, depth+1)),
-        AstNode::Switch { expr, arms, .. } => {
-            let a: Vec<_> = arms.iter().map(|arm| {
-                let p: Vec<_> = arm.patterns.iter().map(|p| format_ast_node(p, depth+2)).collect();
-                format!("{}  {} => {}", indent, p.join(" | "), format_ast_block(&arm.body, depth+2))
-            }).collect();
-            format!("{}Switch({}, [{}])", indent, format_ast_node(expr, depth+2), a.join(", "))
-        }
-        AstNode::Break(_) => format!("{}Break", indent),
-        AstNode::Fail { type_name, .. } => format!("{}Fail({})", indent, type_name),
-        AstNode::Use { path, .. } => format!("{}Use({})", indent, path.join(".")),
-        AstNode::ErrorDecl { name, .. } => format!("{}Error({})", indent, name),
-        AstNode::ErrorEnum { name, variants, .. } =>
-            format!("{}ErrorEnum({}, [{}])", indent, name, variants.join(", ")),
-        AstNode::Fallback { expr, default, .. } =>
-            format!("{}Fallback({}, {})", indent, format_ast_node(expr, depth+2), format_ast_node(default, depth+2)),
-        AstNode::Except { expr, arms, .. } => {
-            let a: Vec<_> = arms.iter().map(|arm| {
-                format!("{}  |{}| {}", indent, arm.type_name, format_ast_block(&arm.body, depth+2))
-            }).collect();
-            format!("{}Except({}, [{}])", indent, format_ast_node(expr, depth+2), a.join(", "))
-        }
-        AstNode::ListRepeat { val, count, .. } =>
-            format!("{}ListRepeat({}, {})", indent, format_ast_node(val, depth+2), format_ast_node(count, depth+2)),
-        AstNode::Template { parts, .. } => format!("{}Template({:?})", indent, parts),
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  Bytecode disassembler
-// ═══════════════════════════════════════════════════════════════
-
-/// Compile source and return disassembled bytecode.
-#[wasm_bindgen(js_name = _disassemble)]
-pub fn disassemble(source: &str) -> YsResult {
-    std::panic::catch_unwind(|| {
-        match ys_core::codegen::Codegen::compile(source) {
-            Ok(program) => {
-                use ys_core::compiler::Instruction;
-                let mut out = String::new();
-                out.push_str(&format!("Functions: {}\n", program.functions.len()));
-                out.push_str(&format!("Locals: {}\n\n", program.locals_count));
-
-                for (fi, func) in program.functions.iter().enumerate() {
-                    let dflt = std::sync::Arc::from("?");
-                    let name = program.string_pool.get(func.name_id as usize).unwrap_or(&dflt);
-                    out.push_str(&format!("--- fn {}: {} (p={}, l={}) ---\n", fi, name, func.params_count, func.locals_count));
-                    for (i, ins) in func.instructions.iter().enumerate() {
-                        out.push_str(&format!("  {:>4}: {:?}\n", i, ins));
-                    }
-                    out.push('\n');
-                }
-                out.push_str("--- main ---\n");
-                for (i, ins) in program.instructions.iter().enumerate() {
-                    out.push_str(&format!("  {:>4}: {:?}\n", i, ins));
-                }
-                YsResult::ok(out)
-            }
-            Err(e) => YsResult::err(e.to_string()),
-        }
-    })
-    .unwrap_or_else(|_| YsResult::err("Panic during disassembly".into()))
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  Eval — run code and capture print output
-// ═══════════════════════════════════════════════════════════════
-
-/// Evaluate source, capture print output, return structured result.
+/// Evaluate source, capture print output as structured lines.
 #[wasm_bindgen(js_name = _eval)]
-pub fn eval(source: &str) -> YsResult {
+pub fn eval(source: &str) -> JsValue {
     ys_runtime::natives::io::set_print_buf(Some(Vec::new()));
 
     let result = std::panic::catch_unwind(|| {
-        use ys_core::codegen::Codegen;
-        use ys_runtime::vm::run_interpreter;
-
-        match Codegen::compile(source) {
-            Ok(program) => match run_interpreter(program) {
+        match ys_core::codegen::Codegen::compile(source) {
+            Ok(program) => match ys_runtime::vm::run_interpreter(program) {
                 Ok(_) => None,
                 Err(e) => Some(e.to_string()),
             },
@@ -230,12 +30,272 @@ pub fn eval(source: &str) -> YsResult {
         Err(_) => Some("Panic during evaluation".into()),
     };
 
-    let output = String::from_utf8_lossy(&ys_runtime::natives::io::take_print_buf())
-        .trim_end()
-        .to_string();
+    let raw = String::from_utf8_lossy(&ys_runtime::natives::io::take_print_buf()).into_owned();
+    let lines = raw.split('\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            // Each line is "[l.N] value" or just "value"
+            let obj = js_sys::Object::new();
+            if let Some(pos) = l.find("] ") {
+                let tag = &l[..pos+1]; // "[l.N]"
+                let val = &l[pos+2..];
+                js_sys::Reflect::set(&obj, &"value".into(), &val.into()).ok();
+                let line_str = tag.trim_start_matches("[l.").trim_end_matches("]");
+                if let Ok(n) = line_str.parse::<u32>() {
+                    js_sys::Reflect::set(&obj, &"line".into(), &JsValue::from(n)).ok();
+                }
+            } else {
+                js_sys::Reflect::set(&obj, &"value".into(), &l.into()).ok();
+            }
+            obj.into()
+        })
+        .collect::<Vec<JsValue>>();
 
+    let out = js_sys::Object::new();
     match error {
-        Some(e) => YsResult { success: false, output, error: e },
-        None => YsResult::ok(output),
+        Some(e) => {
+            js_sys::Reflect::set(&out, &"success".into(), &JsValue::from(false)).ok();
+            js_sys::Reflect::set(&out, &"error".into(), &e.into()).ok();
+            js_sys::Reflect::set(&out, &"lines".into(), &JsValue::from(lines)).ok();
+        }
+        None => {
+            js_sys::Reflect::set(&out, &"success".into(), &JsValue::from(true)).ok();
+            js_sys::Reflect::set(&out, &"lines".into(), &JsValue::from(lines)).ok();
+        }
     }
+    out.into()
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  AST — return as a structured JSON tree
+// ═══════════════════════════════════════════════════════════════
+
+#[wasm_bindgen(js_name = _parseAst)]
+pub fn parse_ast(source: &str) -> JsValue {
+    let out = js_sys::Object::new();
+    let result = std::panic::catch_unwind(|| {
+        let mut parser = ys_core::ast_parser::AstParser::new(source)?;
+        parser.parse_program()
+    });
+    match result {
+        Ok(Ok(ast)) => {
+            js_sys::Reflect::set(&out, &"success".into(), &JsValue::from(true)).ok();
+            js_sys::Reflect::set(&out, &"data".into(), &ast_block_to_js(&ast)).ok();
+        }
+        Ok(Err(e)) => {
+            js_sys::Reflect::set(&out, &"success".into(), &JsValue::from(false)).ok();
+            js_sys::Reflect::set(&out, &"error".into(), &e.to_string().into()).ok();
+        }
+        Err(_) => {
+            js_sys::Reflect::set(&out, &"success".into(), &JsValue::from(false)).ok();
+            js_sys::Reflect::set(&out, &"error".into(), &"Panic during AST parsing".into()).ok();
+        }
+    }
+    out.into()
+}
+
+fn ast_block_to_js(block: &[ys_core::ast::AstNode]) -> JsValue {
+    let arr = js_sys::Array::new();
+    for node in block {
+        arr.push(&ast_node_to_js(node));
+    }
+    arr.into()
+}
+
+fn ast_node_to_js(node: &ys_core::ast::AstNode) -> JsValue {
+    use ys_core::ast::*;
+    let o = js_sys::Object::new();
+    match node {
+        AstNode::Number(n, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"number".into()).ok();
+            js_sys::Reflect::set(&o, &"value".into(), &JsValue::from(*n)).ok();
+        }
+        AstNode::Bool(b, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"bool".into()).ok();
+            js_sys::Reflect::set(&o, &"value".into(), &JsValue::from(*b)).ok();
+        }
+        AstNode::Nil(_) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"nil".into()).ok();
+        }
+        AstNode::Str(s, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"str".into()).ok();
+            js_sys::Reflect::set(&o, &"value".into(), &s.into()).ok();
+        }
+        AstNode::Ident(s, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"ident".into()).ok();
+            js_sys::Reflect::set(&o, &"name".into(), &s.into()).ok();
+        }
+        AstNode::Assign { target, value, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"assign".into()).ok();
+            js_sys::Reflect::set(&o, &"target".into(), &ast_node_to_js(target)).ok();
+            js_sys::Reflect::set(&o, &"value".into(), &ast_node_to_js(value)).ok();
+        }
+        AstNode::Binary { op, lhs, rhs, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"binary".into()).ok();
+            js_sys::Reflect::set(&o, &"op".into(), &format!("{:?}", op).into()).ok();
+            js_sys::Reflect::set(&o, &"left".into(), &ast_node_to_js(lhs)).ok();
+            js_sys::Reflect::set(&o, &"right".into(), &ast_node_to_js(rhs)).ok();
+        }
+        AstNode::Block(stmts, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"block".into()).ok();
+            js_sys::Reflect::set(&o, &"statements".into(), &ast_block_to_js(stmts)).ok();
+        }
+        AstNode::FunCall { name, args, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"call".into()).ok();
+            js_sys::Reflect::set(&o, &"name".into(), &name.into()).ok();
+            let arr = js_sys::Array::new();
+            for a in args { arr.push(&ast_node_to_js(a)); }
+            js_sys::Reflect::set(&o, &"args".into(), &arr.into()).ok();
+        }
+        AstNode::FunDecl { name, params, body, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"function".into()).ok();
+            js_sys::Reflect::set(&o, &"name".into(), &name.into()).ok();
+            let p = js_sys::Array::new();
+            for param in params { p.push(&param.into()); }
+            js_sys::Reflect::set(&o, &"params".into(), &p.into()).ok();
+            js_sys::Reflect::set(&o, &"body".into(), &ast_block_to_js(body)).ok();
+        }
+        AstNode::Return { value, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"return".into()).ok();
+            if let Some(v) = value {
+                js_sys::Reflect::set(&o, &"value".into(), &ast_node_to_js(v)).ok();
+            }
+        }
+        // Shorthand for other literal-like nodes
+        AstNode::ListLit(elems, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"list".into()).ok();
+            let arr = js_sys::Array::new();
+            for e in elems { arr.push(&ast_node_to_js(e)); }
+            js_sys::Reflect::set(&o, &"elements".into(), &arr.into()).ok();
+        }
+        AstNode::ObjectLit(fields, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"object".into()).ok();
+            let arr = js_sys::Array::new();
+            for (k, v) in fields {
+                let pair = js_sys::Object::new();
+                js_sys::Reflect::set(&pair, &"key".into(), &k.into()).ok();
+                js_sys::Reflect::set(&pair, &"value".into(), &ast_node_to_js(v)).ok();
+                arr.push(&pair.into());
+            }
+            js_sys::Reflect::set(&o, &"fields".into(), &arr.into()).ok();
+        }
+        AstNode::For { var, iter, body, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"for".into()).ok();
+            js_sys::Reflect::set(&o, &"var".into(), &var.into()).ok();
+            js_sys::Reflect::set(&o, &"iter".into(), &ast_node_to_js(iter)).ok();
+            js_sys::Reflect::set(&o, &"body".into(), &ast_block_to_js(body)).ok();
+        }
+        AstNode::If { cond, then_block, else_block, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"if".into()).ok();
+            js_sys::Reflect::set(&o, &"cond".into(), &ast_node_to_js(cond)).ok();
+            js_sys::Reflect::set(&o, &"then".into(), &ast_block_to_js(then_block)).ok();
+            if !else_block.is_empty() {
+                js_sys::Reflect::set(&o, &"else".into(), &ast_block_to_js(else_block)).ok();
+            }
+        }
+        AstNode::While { cond, body, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"while".into()).ok();
+            js_sys::Reflect::set(&o, &"cond".into(), &ast_node_to_js(cond)).ok();
+            js_sys::Reflect::set(&o, &"body".into(), &ast_block_to_js(body)).ok();
+        }
+        AstNode::Closure { params, body, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"closure".into()).ok();
+            let p = js_sys::Array::new();
+            for param in params { p.push(&param.into()); }
+            js_sys::Reflect::set(&o, &"params".into(), &p.into()).ok();
+            js_sys::Reflect::set(&o, &"body".into(), &ast_node_to_js(body)).ok();
+        }
+        AstNode::MethodCall { obj, method, args, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"method_call".into()).ok();
+            js_sys::Reflect::set(&o, &"object".into(), &ast_node_to_js(obj)).ok();
+            js_sys::Reflect::set(&o, &"method".into(), &method.into()).ok();
+            let arr = js_sys::Array::new();
+            for a in args { arr.push(&ast_node_to_js(a)); }
+            js_sys::Reflect::set(&o, &"args".into(), &arr.into()).ok();
+        }
+        AstNode::Index { obj, index, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"index".into()).ok();
+            js_sys::Reflect::set(&o, &"object".into(), &ast_node_to_js(obj)).ok();
+            js_sys::Reflect::set(&o, &"index".into(), &ast_node_to_js(index)).ok();
+        }
+        AstNode::Field { obj, name, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"field".into()).ok();
+            js_sys::Reflect::set(&o, &"object".into(), &ast_node_to_js(obj)).ok();
+            js_sys::Reflect::set(&o, &"name".into(), &name.into()).ok();
+        }
+        AstNode::Range { start, end, step, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"range".into()).ok();
+            js_sys::Reflect::set(&o, &"start".into(), &ast_node_to_js(start)).ok();
+            js_sys::Reflect::set(&o, &"end".into(), &ast_node_to_js(end)).ok();
+            if let Some(s) = step {
+                js_sys::Reflect::set(&o, &"step".into(), &ast_node_to_js(s)).ok();
+            }
+        }
+        AstNode::Unary { op, expr, .. } => {
+            js_sys::Reflect::set(&o, &"type".into(), &"unary".into()).ok();
+            js_sys::Reflect::set(&o, &"op".into(), &format!("{:?}", op).into()).ok();
+            js_sys::Reflect::set(&o, &"expr".into(), &ast_node_to_js(expr)).ok();
+        }
+        AstNode::Yield(v, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"yield".into()).ok();
+            js_sys::Reflect::set(&o, &"value".into(), &ast_node_to_js(v)).ok();
+        }
+        AstNode::Await(v, _) => {
+            js_sys::Reflect::set(&o, &"type".into(), &"await".into()).ok();
+            js_sys::Reflect::set(&o, &"expr".into(), &ast_node_to_js(v)).ok();
+        }
+        _ => {
+            js_sys::Reflect::set(&o, &"type".into(), &format!("{:?}", node).into()).ok();
+        }
+    }
+    o.into()
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Bytecode — return as structured list of instructions
+// ═══════════════════════════════════════════════════════════════
+
+#[wasm_bindgen(js_name = _disassemble)]
+pub fn disassemble(source: &str) -> JsValue {
+    let out = js_sys::Object::new();
+    let result = std::panic::catch_unwind(|| {
+        ys_core::codegen::Codegen::compile(source)
+    });
+    match result {
+        Ok(Ok(program)) => {
+            js_sys::Reflect::set(&out, &"success".into(), &JsValue::from(true)).ok();
+            let funcs = js_sys::Array::new();
+            for (fi, func) in program.functions.iter().enumerate() {
+                let f = js_sys::Object::new();
+                let default_name = Arc::from("?");
+                let name = program.string_pool.get(func.name_id as usize).unwrap_or(&default_name);
+                js_sys::Reflect::set(&f, &"index".into(), &JsValue::from(fi as u32)).ok();
+                js_sys::Reflect::set(&f, &"name".into(), &name.as_ref().into()).ok();
+                js_sys::Reflect::set(&f, &"params".into(), &JsValue::from(func.params_count as u32)).ok();
+                js_sys::Reflect::set(&f, &"locals".into(), &JsValue::from(func.locals_count as u32)).ok();
+                let instrs = js_sys::Array::new();
+                for (i, ins) in func.instructions.iter().enumerate() {
+                    instrs.push(&JsValue::from(format!("{:?}", ins)));
+                }
+                js_sys::Reflect::set(&f, &"instructions".into(), &instrs.into()).ok();
+                funcs.push(&f.into());
+            }
+            js_sys::Reflect::set(&out, &"functions".into(), &funcs.into()).ok();
+
+            let main = js_sys::Array::new();
+            for (i, ins) in program.instructions.iter().enumerate() {
+                main.push(&JsValue::from(format!("{:?}", ins)));
+            }
+            js_sys::Reflect::set(&out, &"main".into(), &main.into()).ok();
+        }
+        Ok(Err(e)) => {
+            js_sys::Reflect::set(&out, &"success".into(), &JsValue::from(false)).ok();
+            js_sys::Reflect::set(&out, &"error".into(), &e.to_string().into()).ok();
+        }
+        Err(_) => {
+            js_sys::Reflect::set(&out, &"success".into(), &JsValue::from(false)).ok();
+            js_sys::Reflect::set(&out, &"error".into(), &"Panic during disassembly".into()).ok();
+        }
+    }
+    out.into()
 }

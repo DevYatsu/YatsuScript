@@ -351,14 +351,34 @@ function refreshAst() {
   if (!wasmAst || !editor) return;
   const source = editor.getValue();
   const result = wasmAst(source);
-  $astView.textContent = result.success ? result.output : result.error;
+  if (result.success) {
+    $astView.textContent = JSON.stringify(result.data, null, 2);
+  } else {
+    $astView.textContent = 'Error: ' + (result.error || 'Unknown error');
+  }
 }
 
 function refreshBytecode() {
   if (!wasmBytecode || !editor) return;
   const source = editor.getValue();
   const result = wasmBytecode(source);
-  $bytecodeView.textContent = result.success ? result.output : result.error;
+  if (result.success) {
+    let text = '';
+    (result.functions || []).forEach(fn => {
+      text += `--- fn ${fn.index}: ${fn.name} (p=${fn.params}, l=${fn.locals}) ---\n`;
+      (fn.instructions || []).forEach((instr, i) => {
+        text += `  ${String(i).padStart(4)}: ${instr}\n`;
+      });
+      text += '\n';
+    });
+    text += '--- main ---\n';
+    (result.main || []).forEach((instr, i) => {
+      text += `  ${String(i).padStart(4)}: ${instr}\n`;
+    });
+    $bytecodeView.textContent = text;
+  } else {
+    $bytecodeView.textContent = 'Error: ' + (result.error || 'Unknown error');
+  }
 }
 
 // Run the current code
@@ -376,12 +396,16 @@ function runCode() {
     const elapsed = ((performance.now() - t0) / 1000).toFixed(4);
 
     if (result.success) {
-      $output.innerHTML = result.output ? formatOutput(result.output) : '';
+      // result.lines is an array of {value, line?}
+      const lines = result.lines || [];
+      $output.innerHTML = lines.length
+        ? lines.map(l => formatOutputLine(l)).join('\n')
+        : '';
     } else {
       let html = '';
-      if (result.output) {
-        html += formatOutput(result.output) + '\n';
-      }
+      const errLines = result.lines || [];
+      html += errLines.map(l => formatOutputLine(l)).join('\n');
+      if (html) html += '\n';
       html += '<span class="error-text">' + escapeHtml(result.error || 'Unknown error') + '</span>';
       $output.innerHTML = html;
     }
@@ -399,18 +423,13 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Format print output with line number markers [l.N] on the left
-function formatOutput(str) {
-  return str.split('\n').map(line => {
-    // Match [l.N] at the START of a line
-    const match = line.match(/^\[l\.(\d+)\]\s*(.*)$/);
-    if (match) {
-      const lineNum = match[1];
-      const value = escapeHtml(match[2]);
-      return `<span class="line-ref">[l.${lineNum}]</span> <span class="ok-text">${value}</span>`;
-    }
-    return '<span class="ok-text">' + escapeHtml(line) + '</span>';
-  }).join('\n');
+// Format a single print line object {value, line?}
+function formatOutputLine(l) {
+  const val = escapeHtml(l.value || '');
+  if (l.line !== undefined && l.line !== null) {
+    return `<span class="line-ref">[l.${l.line}]</span> <span class="ok-text">${val}</span>`;
+  }
+  return `<span class="ok-text">${val}</span>`;
 }
 
 // Event handlers
