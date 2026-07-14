@@ -1,120 +1,88 @@
 # ysc WASM
 
-ysc language interpreter compiled to WebAssembly. Run `.ys` scripts in the browser with full `print()` capture, AST inspection, and bytecode disassembly.
-
-## Quick Start
+ysc language interpreter compiled to WebAssembly. Run `.ys` scripts in the browser with `print()` capture, AST inspection, bytecode disassembly, syntax highlighting, and LSP grammar.
 
 ```bash
 npm install ysc-wasm
 ```
+
+## Quick Start — Interpreter
 
 ```js
 import init, { _eval, _parseAst, _disassemble } from 'ysc-wasm';
 
 await init();
 
-// ── Eval ──────────────────────────────────────────────
-const result = _eval(`print("hello " + 42)`);
-console.log(result.success);   // true
-console.log(result.lines);     // [{ value: "hello 42", line: 1 }]
-
-// ── AST ───────────────────────────────────────────────
-const ast = _parseAst(`fun f(x) { ret x + 1 }`);
-console.log(ast.data);
-// [{ type: "function", name: "f", params: ["x"], body: [...] }]
-
-// ── Bytecode ──────────────────────────────────────────
-const bc = _disassemble(`print(1 + 2)`);
-console.log(bc.functions);
-console.log(bc.main);
+const r = _eval(`print("hello " + 42)`);
+console.log(r.lines[0].value); // "hello 42"
 ```
 
-## API
+## Quick Start — Syntax Highlighting (Monaco)
 
-### `_eval(source: string): EvalResult`
+```js
+import { monarchLanguage, registerMonaco } from 'ysc-wasm/syntax.js';
 
-Compile and run ysc code. Captures all `print()` output.
+// Option 1: get the tokenizer definition
+monaco.languages.register({ id: 'ysc' });
+monaco.languages.setMonarchTokensProvider('ysc', monarchLanguage);
 
-```ts
-interface EvalResult {
-  success: boolean;
-  lines: PrintLine[];
-  error?: string;
-}
-
-interface PrintLine {
-  value: string;         // the printed text
-  line?: number;         // source line number (when available)
-}
+// Option 2: one-liner
+registerMonaco();
 ```
 
-### `_parseAst(source: string): AstResult`
+## Package Contents
 
-Parse source into a structured AST tree.
+| Path | Description |
+|------|-------------|
+| `ysc-wasm` (default) | WASM interpreter: `_eval`, `_parseAst`, `_disassemble` |
+| `ysc-wasm/syntax.js` | Monaco Monarch tokenizer + `registerMonaco()` helper |
+| `ysc-wasm/ysc.tmLanguage.json` | TextMate grammar (VS Code, Sublime, etc.) |
+
+## Full API
+
+### Interpreter
+
+#### `_eval(source): EvalResult`
+Run code, capture `print()` output.
 
 ```ts
-interface AstResult {
-  success: boolean;
-  data: AstNode[];
-  error?: string;
-}
+{ success: boolean, lines: [{ value: string, line?: number }], error?: string }
 ```
 
-Each `AstNode` has a `type` field (`"number"`, `"binary"`, `"call"`, `"function"`, etc.) and type-specific fields like `value`, `left`, `right`, `name`, `args`, etc.
-
-### `_disassemble(source: string): BytecodeResult`
-
-Compile source and return the bytecode instructions.
+#### `_parseAst(source): AstResult`
+Parse source into structured AST.
 
 ```ts
-interface BytecodeResult {
-  success: boolean;
-  functions: FunctionBytecode[];
-  main: string[];
-  error?: string;
-}
+{ success: boolean, data: AstNode[], error?: string }
+```
 
-interface FunctionBytecode {
-  index: number;
-  name: string;
-  params: number;
-  locals: number;
-  instructions: string[];
-}
+#### `_disassemble(source): BytecodeResult`
+Compile and return bytecode.
+
+```ts
+{ success: boolean, functions: [{ index, name, params, locals, instructions }], main: string[], error?: string }
+```
+
+### Syntax
+
+#### `monarchLanguage`
+Monarch tokenizer definition object — pass directly to `monaco.languages.setMonarchTokensProvider()`.
+
+#### `registerMonaco()`
+Register the `ysc` language in Monaco Editor (idempotent — safe to call multiple times).
+
+#### `ysc.tmLanguage.json`
+TextMate grammar for VS Code, Sublime Text, etc.
+
+```bash
+# VS Code: copy to .vscode/syntaxes/
+cp node_modules/ysc-wasm/ysc.tmLanguage.json .vscode/syntaxes/
 ```
 
 ## Building from source
 
 ```bash
-wasm-pack build ys-wasm --target web --no-default-features
-```
-
-Or use the build script (which patches package metadata):
-
-```bash
 cd ys-wasm && bash build.sh
 ```
 
-## Examples
-
-```js
-import init, { _eval } from 'ysc-wasm';
-
-await init();
-
-// Run code and show output
-const r = _eval(`
-fun fib(n) {
-  if n < 2 { ret n }
-  else { ret fib(n - 1) + fib(n - 2) }
-}
-print("fib(10) = " + fib(10))
-`);
-
-if (r.success) {
-  r.lines.forEach(l => {
-    const loc = l.line ? ` [line ${l.line}]` : '';
-    console.log(`${l.value}${loc}`);
-  });
-}
-```
+Publishes to `pkg/` with all assets.
