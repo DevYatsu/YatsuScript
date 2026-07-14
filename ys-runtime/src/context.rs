@@ -31,7 +31,7 @@ pub struct SpawnedTask {
 
 //  Backend trait
 
-/// An execution backend for compiled YatsuScript programs.
+/// An execution backend for compiled ysc programs.
 ///
 /// This trait allows different execution strategies (e.g. interpreter vs potentially a JIT)
 /// to be swapped out while using the same shared context and heap.
@@ -56,7 +56,7 @@ pub enum Callable {
     Native(NativeFn),
 }
 
-/// The global shared state for a YatsuScript execution environment.
+/// The global shared state for a ysc execution environment.
 ///
 /// Contains:
 /// - The [`Heap`] (object storage)

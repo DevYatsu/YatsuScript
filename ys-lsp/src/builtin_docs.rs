@@ -1,4 +1,4 @@
-//! Static documentation strings for YatsuScript built-in functions and keywords.
+//! Static documentation strings for ysc built-in functions and keywords.
 //!
 //! These are emitted as hover and completion documentation.
 

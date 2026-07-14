@@ -1,4 +1,4 @@
-//! The Language Server implementation for YatsuScript.
+//! The Language Server implementation for ysc.
 //!
 //! Provides the [`tower_lsp::LanguageServer`] trait methods.
 

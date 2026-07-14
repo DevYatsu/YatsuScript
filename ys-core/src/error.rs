@@ -19,7 +19,7 @@ impl std::fmt::Display for ErrorLoc {
     }
 }
 
-/// Every error that can be produced while compiling or running a YatsuScript program.
+/// Every error that can be produced while compiling or running a ysc program.
 #[derive(Error, Debug, Clone)]
 pub enum JitError {
     #[error("Lexing error at {loc}: {err:?}")]

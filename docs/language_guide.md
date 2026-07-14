@@ -1,13 +1,13 @@
-# YatsuScript Language Guide
+# ysc Language Guide
 
-YatsuScript uses a clean, minimal syntax. Statements are terminated by newlines (no semicolons). Braces `{}` define blocks.
+ysc uses a clean, minimal syntax. Statements are terminated by newlines (no semicolons). Braces `{}` define blocks.
 
 ## 1. Variables
 
 Variables are mutable by default. The first assignment declares a variable.
 
 ```yatscript
-name = "YatsuScript"     // declaration + assignment
+name = "ysc"     // declaration + assignment
 count = 0
 count = count + 1        // reassignment
 ```
@@ -237,7 +237,7 @@ Objects are hash maps from string keys to values. When a field access doesn't fi
 
 ## 8. Async / Await
 
-YatsuScript supports async functions via the `async` keyword and `await` expression:
+ysc supports async functions via the `async` keyword and `await` expression:
 
 ```yatscript
 async fun fetch_url(url) {
@@ -255,7 +255,7 @@ The `await` keyword handles both Promise and non-Promise values:
 
 ## 9. Modules
 
-YatsuScript has a Rust-style module system:
+ysc has a Rust-style module system:
 
 ```yatscript
 // Import a module
@@ -381,7 +381,7 @@ Note: Template expression interpolation is parsed by the lexer but evaluated as 
 
 ## 14. Type System
 
-YatsuScript is dynamically typed with NaN-boxed values:
+ysc is dynamically typed with NaN-boxed values:
 
 | Type | Examples | Storage |
 |------|----------|---------|
@@ -399,7 +399,7 @@ YatsuScript is dynamically typed with NaN-boxed values:
 
 ## 15. Code Formatter
 
-YatsuScript includes a built-in code formatter:
+ysc includes a built-in code formatter:
 
 ```bash
 ysc fmt <file-or-directory>

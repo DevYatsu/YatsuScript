@@ -1,8 +1,8 @@
 # ysc-lsp
 
-> A full Language Server Protocol (LSP) implementation for the YatsuScript programming language.
+> A full Language Server Protocol (LSP) implementation for the ysc programming language.
 
-`ysc-lsp` makes YatsuScript feel like a modern, professional language by providing IDE features like intelligent highlighting, real-time diagnostics, and documentation hover.
+`ysc-lsp` makes ysc feel like a modern, professional language by providing IDE features like intelligent highlighting, real-time diagnostics, and documentation hover.
 
 ## Features
 
@@ -67,7 +67,7 @@ require('lspconfig').yatsuscript.setup {
 
 1. **[Backend](src/backend.rs)**: The core LSP server implementation using the `tower-lsp` framework.
 2. **[Analysis](src/analysis.rs)**: Orchestrates the `ys-core` parser to extract semantic data from the source.
-3. **[Built-in Docs](src/builtin_docs.rs)**: Contains the documentation data for native YatsuScript functions.
+3. **[Built-in Docs](src/builtin_docs.rs)**: Contains the documentation data for native ysc functions.
 4. **[Main](src/main.rs)**: Configures the transport layer (stdio) and handles the server lifecycle.
 
 ## License

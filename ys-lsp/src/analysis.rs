@@ -1,4 +1,4 @@
-//! Optimized source analysis for YatsuScript LSP.
+//! Optimized source analysis for ysc LSP.
 //!
 //! Performs a single-pass scan of the token stream to build an index of
 //! high-level declarations (functions, variables) and collect diagnostics.

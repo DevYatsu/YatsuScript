@@ -1,8 +1,8 @@
 # ys-runtime
 
-> The YatsuScript execution engine: VM, Generational GC, and Global Context.
+> The ysc execution engine: VM, Generational GC, and Global Context.
 
-`ys-runtime` is the backend responsible for taking compiled YatsuScript bytecode and running it. It manages the runtime state, objects, memory, and native function integrations.
+`ys-runtime` is the backend responsible for taking compiled ysc bytecode and running it. It manages the runtime state, objects, memory, and native function integrations.
 
 ## Why This Exists
 
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Generational GC**: A high-performance, concurrent garbage collector with nursery and tenured generations.
 - **NaN-boxed Runtime**: Fast, header-less 64-bit value representation for all types.
 - **Asynchronous Execution**: Native `spawn` support via Tokio for true parallel task processing.
-- **Native Integration**: Easy-to-use hooks for registering custom Rust functions as YatsuScript built-ins.
+- **Native Integration**: Easy-to-use hooks for registering custom Rust functions as ysc built-ins.
 
 ## Built-in Modules
 

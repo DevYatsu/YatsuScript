@@ -1,13 +1,13 @@
 //! # ys-core
 //!
-//! The YatsuScript language frontend.
+//! The ysc language frontend.
 //!
 //! This crate contains everything needed to go from source text to compiled
 //! bytecode.  It has **no async runtime**, **no I/O**, and **no network** deps.
 //!
 //! Dependents:
 //! - `ys-runtime` — takes the compiled [`Program`] and executes it
-//! - `yatsuscript-lsp` — uses the lexer and parser for analysis
+//! - `ysc-lsp` — uses the lexer and parser for analysis
 
 pub mod ast;
 pub mod ast_parser;

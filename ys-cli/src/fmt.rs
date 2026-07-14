@@ -1,6 +1,6 @@
 //! # ys-cli fmt
 //!
-//! A simple YatsuScript code formatter.
+//! A simple ysc code formatter.
 
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -9,7 +9,7 @@ use colored::Colorize;
 
 use ys_core::lexer::Token;
 
-/// Format all YatsuScript files in a directory or a single file.
+/// Format all ysc files in a directory or a single file.
 pub fn format_all(input: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut files = Vec::<PathBuf>::new();
 

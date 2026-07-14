@@ -1,4 +1,4 @@
-//! Lexical analysis for the YatsuScript language.
+//! Lexical analysis for the ysc language.
 //!
 //! This module is built on top of the [`logos`] crate, which generates a
 //! highly optimised DFA-based scanner from the token definitions below.

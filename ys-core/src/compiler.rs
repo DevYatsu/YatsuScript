@@ -1,4 +1,4 @@
-//! Compile-time structures for the YatsuScript bytecode.
+//! Compile-time structures for the ysc bytecode.
 //!
 //! Defines:
 //! - [`Value`] — a NaN-boxed 64-bit word that represents all runtime values
@@ -162,7 +162,7 @@ impl Value {
 
 //  Instructions
 
-/// The instruction set for the register-based YatsuScript VM.
+/// The instruction set for the register-based ysc VM.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// Load a constant `Value` into a destination register.

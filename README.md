@@ -1,8 +1,8 @@
-# YatsuScript
+# ysc
 
 > A register-based bytecode interpreter with a generational GC, async/await, and a custom LSP.
 
-YatsuScript is a lightweight scripting language with a register-based VM, NaN-boxed values, closures, pattern matching, async/await, and a novel failure handling system — no try/catch, no stack unwinding.
+ysc is a lightweight scripting language with a register-based VM, NaN-boxed values, closures, pattern matching, async/await, and a novel failure handling system — no try/catch, no stack unwinding.
 
 ## Quick Start
 
@@ -17,7 +17,7 @@ ysc              # REPL
 ### Variables & Functions
 
 ```yatscript
-name = "YatsuScript"                   // mutable by default
+name = "ysc"                   // mutable by default
 fun greet(name) {
   return "Hello, " + name              // explicit return
 }

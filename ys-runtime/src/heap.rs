@@ -1,6 +1,6 @@
 //! Heap allocation, object types, and the generational garbage collector.
 //!
-//! The heap stores all complex YatsuScript values that do not fit in the
+//! The heap stores all complex ysc values that do not fit in the
 //! 64-bit NaN-boxed [`Value`] inline (strings > 6 bytes, lists, objects,
 //! ranges, timestamps, and bound methods).
 //!

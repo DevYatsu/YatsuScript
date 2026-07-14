@@ -1,11 +1,11 @@
 # Benchmarks
 
-This folder compares **YatsuScript** against:
+This folder compares **ysc** against:
 
 - Python (`python3`)
 - V8 via Node.js (`node`)
 
-The benchmark set currently covers the existing YatsuScript programs in:
+The benchmark set currently covers the existing ysc programs in:
 
 - [`examples/fib.ys`](/Users/yanis/Programming/small_jit/examples/fib.ys)
 - [`examples/prime.ys`](/Users/yanis/Programming/small_jit/examples/prime.ys)
@@ -26,7 +26,7 @@ Equivalent implementations live here:
 - `python3`
 - `node`
 
-Build the YatsuScript binary in release mode before benchmarking:
+Build the ysc binary in release mode before benchmarking:
 
 ```bash
 cargo build --release
@@ -70,6 +70,6 @@ python3 benchmarks/run.py --runs 10
 
 ## Notes
 
-- The YatsuScript programs are executed directly from the `examples/` folder so the benchmark always measures the current canonical YatsuScript versions.
+- The ysc programs are executed directly from the `examples/` folder so the benchmark always measures the current canonical ysc versions.
 - The runner reports wall-clock timing gathered outside each process, which makes the comparison consistent across runtimes.
 - For serious benchmarking, run on an otherwise idle machine and repeat enough times to smooth out noise.

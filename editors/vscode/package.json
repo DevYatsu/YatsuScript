@@ -31,7 +31,7 @@
       }
     ],
     "configuration": {
-      "title": "YatsuScript",
+      "title": "ysc",
       "properties": {
         "ysc.serverPath": {
           "type": "string",

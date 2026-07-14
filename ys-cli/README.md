@@ -1,8 +1,8 @@
 # ys-cli (ysc)
 
-> The user-facing command-line tool for YatsuScript: Execution, REPL, and Code Formatting.
+> The user-facing command-line tool for ysc: Execution, REPL, and Code Formatting.
 
-`ys-cli` is the entry point for running YatsuScript in any environment. It ties together the core parser and the runtime to provide a seamless developer experience from the terminal.
+`ys-cli` is the entry point for running ysc in any environment. It ties together the core parser and the runtime to provide a seamless developer experience from the terminal.
 
 ## Why This Exists
 
@@ -44,7 +44,7 @@ ysc fmt .
 
 | Command | Action | Description |
 |---------|--------|-------------|
-| `<path>` | **Run** | Compiles and executes the specified YatsuScript file. |
+| `<path>` | **Run** | Compiles and executes the specified ysc file. |
 | `-c "<code>"` | **Eval** | Runs a raw string of code directly. |
 | `fmt <path>` | **Format** | Standardizes indentation and syntax across `.ys` files. |
 | (none) | **REPL** | Starts an interactive shell for the language. |

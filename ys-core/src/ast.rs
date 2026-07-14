@@ -1,4 +1,4 @@
-//! Abstract Syntax Tree for YatsuScript.
+//! Abstract Syntax Tree for ysc.
 //!
 //! The parser produces an AST; the optimizer walks and transforms it;
 //! the codegen walks it to emit bytecode instructions.

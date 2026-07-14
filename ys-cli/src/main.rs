@@ -25,9 +25,9 @@ struct Cli {
 enum Commands {
     /// Run a script file.
     Run { file: PathBuf },
-    /// Format YatsuScript files.
+    /// Format ysc files.
     Fmt { path: PathBuf },
-    /// Syntax-check YatsuScript files.
+    /// Syntax-check ysc files.
     Check { path: PathBuf },
 }
 

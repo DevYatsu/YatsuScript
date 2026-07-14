@@ -1,8 +1,8 @@
 # ys-core
 
-> The linguistic frontend of YatsuScript: Lexer, Parser, and Bytecode Compiler.
+> The linguistic frontend of ysc: Lexer, Parser, and Bytecode Compiler.
 
-`ys-core` is the heart of the YatsuScript language. It transforms raw ASCII source code into optimized, register-based bytecode ready for execution by the runtime.
+`ys-core` is the heart of the ysc language. It transforms raw ASCII source code into optimized, register-based bytecode ready for execution by the runtime.
 
 ## Features
 

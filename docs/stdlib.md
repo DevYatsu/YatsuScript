@@ -1,4 +1,4 @@
-# YatsuScript Standard Library Reference
+# ysc Standard Library Reference
 
 ## I/O Core
 
@@ -83,7 +83,7 @@ Starts a minimal HTTP server on the given port. Returns a **Promise** that resol
 
 ```yatscript
 fun handle(req) {
-  return "Hello from YatsuScript!"
+  return "Hello from ysc!"
 }
 
 await serve(8080, handle)

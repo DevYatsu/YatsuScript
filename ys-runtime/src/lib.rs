@@ -1,6 +1,6 @@
 //! # ys-runtime
 //!
-//! The YatsuScript execution engine.
+//! The ysc execution engine.
 //!
 //! Provides:
 //! - The [`Backend`] trait and [`Interpreter`] implementation

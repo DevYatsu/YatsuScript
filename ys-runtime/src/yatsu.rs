@@ -41,12 +41,12 @@ pub fn bad_arg(idx: usize, func_name: &str, expected: &str, got: &Value) -> JitE
 
 //  FromLua / ToLua
 
-/// Types that can be created from a YatsuScript [`Value`].
+/// Types that can be created from a ysc [`Value`].
 pub trait FromLua: Sized {
     fn from_lua(val: Value, ctx: &Context) -> Result<Self, JitError>;
 }
 
-/// Types that can be converted into a YatsuScript [`Value`].
+/// Types that can be converted into a ysc [`Value`].
 pub trait ToLua {
     fn to_lua(self, ctx: &Context) -> Result<Value, JitError>;
 }
