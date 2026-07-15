@@ -36,7 +36,7 @@ jobs:
           mkdir -p deploy/pkg
           cp ys-wasm/pkg/* deploy/pkg/
           touch deploy/.nojekyll
-          echo "ysc-lang.dev" > deploy/CNAME 2>/dev/null || true
+          # echo "customdomain.com" > deploy/CNAME  # uncomment when you have a custom domain
 
       - name: Deploy to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
