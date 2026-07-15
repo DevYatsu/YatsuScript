@@ -3,7 +3,6 @@
 //! Token-based formatter that normalizes whitespace (no AST needed).
 
 use crate::lexer::Token;
-use logos::Logos;
 
 /// Format YatsuScript source code.
 pub fn format_source(source: &str) -> String {

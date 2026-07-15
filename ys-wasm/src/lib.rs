@@ -298,7 +298,7 @@ fn ast_node_to_js(node: &ys_core::ast::AstNode) -> JsValue {
             js_sys::Reflect::set(&o, &"type".into(), &format!("{:?}", node).into()).ok();
         }
     }
-    out.into()
+    o.into()
 }
 
 // ═══════════════════════════════════════════════════════════════
