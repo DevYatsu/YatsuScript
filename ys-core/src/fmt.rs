@@ -37,8 +37,10 @@ fn format_tokens(tokens: &[Token<'_>]) -> String {
                 if line_start {
                     output.push_str(&"  ".repeat(indent));
                     line_start = false;
-                } else if i > 0 && !matches!(tokens[i-1], Token::Dot)
-                    && token != &Token::RParen && token != &Token::RBracket
+                } else if i > 0
+                    && !matches!(tokens[i-1], Token::Dot | Token::LParen | Token::LBracket | Token::Not)
+                    && token != &Token::LParen && token != &Token::RParen
+                    && token != &Token::LBracket && token != &Token::RBracket
                     && token != &Token::Comma && token != &Token::Range
                     && token != &Token::Pipe
                 {

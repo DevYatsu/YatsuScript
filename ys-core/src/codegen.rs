@@ -173,26 +173,26 @@ impl Codegen {
     fn compile_node(&mut self, node: &AstNode) -> Result<usize, JitError> {
         match node {
             //  Literals
-            AstNode::Number(n, _) => {
+            AstNode::Number(n, loc) => {
                 let dst = self.alloc_reg();
-                self.emit(Instruction::LoadLiteral { dst, val: Value::number(*n) });
+                self.emit(Instruction::LoadLiteral { dst, val: Value::number(*n), loc: *loc });
                 Ok(dst)
             }
-            AstNode::Bool(b, _) => {
+            AstNode::Bool(b, loc) => {
                 let dst = self.alloc_reg();
-                self.emit(Instruction::LoadLiteral { dst, val: Value::bool(*b) });
+                self.emit(Instruction::LoadLiteral { dst, val: Value::bool(*b), loc: *loc });
                 Ok(dst)
             }
-            AstNode::Nil(_) => {
+            AstNode::Nil(loc) => {
                 let dst = self.alloc_reg();
-                self.emit(Instruction::LoadLiteral { dst, val: Value::from_bits(0) });
+                self.emit(Instruction::LoadLiteral { dst, val: Value::from_bits(0), loc: *loc });
                 Ok(dst)
             }
-            AstNode::Str(s, _) => {
+            AstNode::Str(s, loc) => {
                 let dst = self.alloc_reg();
                 let val = Value::sso(s)
                     .unwrap_or_else(|| Value::pool(self.intern(s)));
-                self.emit(Instruction::LoadLiteral { dst, val });
+                self.emit(Instruction::LoadLiteral { dst, val, loc: *loc });
                 Ok(dst)
             }
             AstNode::Template { parts, loc } => {
@@ -271,12 +271,12 @@ impl Codegen {
             AstNode::For { var, iter, body, loc } => {
                 self.compile_for(var, iter, body, *loc)
             }
-            AstNode::Return { value, .. } => {
+            AstNode::Return { value, loc } => {
                 let reg = match value {
                     Some(expr) => Some(self.compile_node(expr)?),
                     None => None,
                 };
-                self.emit(Instruction::Return(reg));
+                self.emit(Instruction::Return { value: reg, loc: *loc });
                 Ok(0)
             }
             AstNode::Yield(expr, loc) => {
@@ -515,7 +515,7 @@ impl Codegen {
                 self.instructions[jump_idx] = Instruction::JumpIfNotFail { src: left_r, target: end };
                 Ok(dst)
             }
-            AstNode::Except { expr, arms, loc: _ } => {
+            AstNode::Except { expr, arms, loc } => {
                 let val_r = self.compile_node(expr)?;
                 let dst = self.alloc_reg();
 
@@ -546,7 +546,7 @@ impl Codegen {
                         let name_id = self.intern(&arm.type_name);
                         // Compare the runtime failure value against a constructed failure literal
                         let lit_r = self.alloc_reg();
-                        self.emit(Instruction::LoadLiteral { dst: lit_r, val: Value::failure(name_id) });
+                        self.emit(Instruction::LoadLiteral { dst: lit_r, val: Value::failure(name_id), loc: *loc });
                         let eq_r = self.alloc_reg();
                         self.emit(Instruction::Eq { dst: eq_r, lhs: val_r, rhs: lit_r });
                         let next_arm_idx = self.instructions.len();
@@ -770,7 +770,7 @@ impl Codegen {
                 Some(sn) => self.compile_node(sn)?,
                 None => {
                     let r = self.alloc_reg();
-                    self.emit(Instruction::LoadLiteral { dst: r, val: Value::number(1.0) });
+                    self.emit(Instruction::LoadLiteral { dst: r, val: Value::number(1.0), loc });
                     r
                 }
             };
@@ -783,7 +783,7 @@ impl Codegen {
 
         // Index register (starts at 0, incremented each iteration by ForNext)
         let idx_reg = self.alloc_reg();
-        self.emit(Instruction::LoadLiteral { dst: idx_reg, val: Value::from_bits(0) });
+        self.emit(Instruction::LoadLiteral { dst: idx_reg, val: Value::from_bits(0), loc });
 
         // "Has more" flag register
         let done_reg = self.alloc_reg();
@@ -857,7 +857,7 @@ impl Codegen {
 
     //  Function declaration
 
-    fn compile_func(&mut self, name: &str, params: &[String], body: &[AstNode], _loc: Loc) {
+    fn compile_func(&mut self, name: &str, params: &[String], body: &[AstNode], loc: Loc) {
         // Save state — compile function body inline with the shared string pool.
         let old_locals = std::mem::take(&mut self.locals);
         let old_reg = self.next_reg;
@@ -871,10 +871,10 @@ impl Codegen {
             self.next_reg = i + 1;
         }
         if let Err(_) = self.compile_block(body) {
-            self.emit(Instruction::Return(None));
+            self.emit(Instruction::Return { value: None, loc });
         }
-        if !matches!(self.instructions.last(), Some(Instruction::Return(_))) {
-            self.emit(Instruction::Return(None));
+        if !matches!(self.instructions.last(), Some(Instruction::Return { .. })) {
+            self.emit(Instruction::Return { value: None, loc });
         }
         let name_id = self.intern(name);
         let func_body = std::mem::replace(&mut self.instructions, saved_instrs);
@@ -898,7 +898,7 @@ impl Codegen {
     /// Compile an async function — creates a pending return promise at the
     /// start so callers immediately get a Promise, even if the body suspends
     /// on an internal await.  The promise is resolved when the body returns.
-    fn compile_async_func(&mut self, name: &str, params: &[String], body: &[AstNode], _loc: Loc) {
+    fn compile_async_func(&mut self, name: &str, params: &[String], body: &[AstNode], loc: Loc) {
         let old_locals = std::mem::take(&mut self.locals);
         let old_reg = self.next_reg;
         let old_in_fn = self.is_in_function;
@@ -915,25 +915,25 @@ impl Codegen {
         self.emit(Instruction::MakePendingPromise { dst: ret_promise_reg });
 
         if let Err(_) = self.compile_block(body) {
-            self.emit(Instruction::Return(None));
+            self.emit(Instruction::Return { value: None, loc });
         }
         // Replace the final return with ResolvePromise + Return(ret_promise)
-        if let Some(Instruction::Return(reg)) = self.instructions.pop() {
+        if let Some(Instruction::Return { value: reg, .. }) = self.instructions.pop() {
             if let Some(value_reg) = reg {
                 self.emit(Instruction::ResolvePromise { promise: ret_promise_reg, value: value_reg });
             } else {
                 // No return value — resolve with nil
                 let nil_reg = self.alloc_reg();
-                self.emit(Instruction::LoadLiteral { dst: nil_reg, val: Value::from_bits(0) });
+                self.emit(Instruction::LoadLiteral { dst: nil_reg, val: Value::from_bits(0), loc });
                 self.emit(Instruction::ResolvePromise { promise: ret_promise_reg, value: nil_reg });
             }
-            self.emit(Instruction::Return(Some(ret_promise_reg)));
+            self.emit(Instruction::Return { value: Some(ret_promise_reg), loc });
         } else {
             // No return instruction at all — body ran to end without returning
             let nil_reg = self.alloc_reg();
-            self.emit(Instruction::LoadLiteral { dst: nil_reg, val: Value::from_bits(0) });
+            self.emit(Instruction::LoadLiteral { dst: nil_reg, val: Value::from_bits(0), loc });
             self.emit(Instruction::ResolvePromise { promise: ret_promise_reg, value: nil_reg });
-            self.emit(Instruction::Return(Some(ret_promise_reg)));
+            self.emit(Instruction::Return { value: Some(ret_promise_reg), loc });
         }
         let name_id = self.intern(name);
         let func_body = std::mem::replace(&mut self.instructions, saved_instrs);
@@ -955,9 +955,7 @@ impl Codegen {
 
     //  Closure
 
-    fn compile_closure(&mut self, params: &[String], body: &AstNode, _loc: Loc) -> Result<usize, JitError> {
-        // Create a fresh codegen for the closure body, but share the closure
-        // counter so nested closures get globally unique names.
+    fn compile_closure(&mut self, params: &[String], body: &AstNode, loc: Loc) -> Result<usize, JitError> {
         let mut func = Codegen::new();
         func.closure_counter = self.closure_counter;
         func.is_in_function = true;
@@ -965,25 +963,18 @@ impl Codegen {
             func.locals.insert(p.clone(), VarInfo { idx: i, is_global: false });
             func.next_reg = i + 1;
         }
-        let captures: Vec<String> = Vec::new(); // TODO: free-variable analysis
+        let captures: Vec<String> = Vec::new();
 
-        // Compile body — may add nested closures to func.functions.
         let result_reg = func.compile_node(body).unwrap_or(0);
 
-        // Transfer nested closures to self.functions with globally unique
-        // names using self.closure_counter.
         for mut nested in std::mem::take(&mut func.functions) {
             let new_name = format!("__closure_{}", self.closure_counter);
             self.closure_counter += 1;
             nested.name_id = self.intern(&new_name);
             self.functions.push(nested);
         }
-        // Update self.closure_counter to include any nested increments
         self.closure_counter = std::cmp::max(self.closure_counter, func.closure_counter);
 
-        // Fix up ALL instructions that reference string-pool indices from
-        // func's pool — at runtime the main pool is used, so name_id values
-        // from func's separate pool would resolve to wrong strings.
         for instr in &mut func.instructions {
             match instr {
                 Instruction::MakeClosure { name_id, .. }
@@ -1002,13 +993,11 @@ impl Codegen {
             }
         }
 
-        // Only expression-body closures (|x| x * 2) get implicit return.
-        // Block-body closures (|x| { ... }) must use explicit `return`.
         let is_expr_body = !matches!(body, AstNode::Block(_, _));
-        if is_expr_body && !matches!(func.instructions.last(), Some(Instruction::Return(_))) {
-            func.emit(Instruction::Return(Some(result_reg)));
-        } else if !matches!(func.instructions.last(), Some(Instruction::Return(_))) {
-            func.emit(Instruction::Return(None));
+        if is_expr_body && !matches!(func.instructions.last(), Some(Instruction::Return { .. })) {
+            func.emit(Instruction::Return { value: Some(result_reg), loc });
+        } else if !matches!(func.instructions.last(), Some(Instruction::Return { .. })) {
+            func.emit(Instruction::Return { value: None, loc });
         }
 
         // Use the shared closure counter for unique naming.
@@ -1043,7 +1032,7 @@ impl Codegen {
                     let r = self.alloc_reg();
                     let val = Value::sso(s)
                         .unwrap_or_else(|| Value::pool(self.intern(s)));
-                    self.emit(Instruction::LoadLiteral { dst: r, val });
+                    self.emit(Instruction::LoadLiteral { dst: r, val, loc });
                     result = Some(self.concat(result, r, loc)?);
                 }
                 TemplatePart::Expr(expr) => {
@@ -1063,7 +1052,7 @@ impl Codegen {
         }
         Ok(result.unwrap_or_else(|| {
             let dst = self.alloc_reg();
-            self.emit(Instruction::LoadLiteral { dst, val: Value::from_bits(0) });
+            self.emit(Instruction::LoadLiteral { dst, val: Value::from_bits(0), loc });
             dst
         }))
     }

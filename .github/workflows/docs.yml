@@ -6,6 +6,7 @@ on:
     paths:
       - 'docs/**'
       - 'ys-wasm/**'
+      - 'ys-core/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 

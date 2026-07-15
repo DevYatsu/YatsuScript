@@ -647,7 +647,7 @@ pub fn execute_bytecode(
 
             match instr {
                 //  Memory
-                Instruction::LoadLiteral { dst, val } => {
+                Instruction::LoadLiteral { dst, val, .. } => {
                     frames[fi].registers[*dst] = *val;
                     frames[fi].pc += 1;
                 }
@@ -699,7 +699,7 @@ pub fn execute_bytecode(
                     }
                     continue;
                 }
-                Instruction::Return(val_reg) => {
+                Instruction::Return { value: val_reg, .. } => {
                     let ret = val_reg.map_or(Value::from_bits(0), |r| frames[fi].registers[r]);
                     let frame = frames.pop().unwrap();
                     pool_regs(frame.registers);

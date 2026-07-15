@@ -18,6 +18,10 @@ pub struct Loc {
     pub col:  u32,
 }
 
+impl Loc {
+    pub const ZERO: Loc = Loc { line: 0, col: 0 };
+}
+
 impl From<(usize, usize)> for Loc {
     fn from((line, col): (usize, usize)) -> Self {
         Self { line: line as u32, col: col as u32 }
@@ -166,7 +170,7 @@ impl Value {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// Load a constant `Value` into a destination register.
-    LoadLiteral { dst: usize, val: Value },
+    LoadLiteral { dst: usize, val: Value, loc: Loc },
     /// Copy a value from one register to another.
     Move { dst: usize, src: usize },
     /// Load a value from a global variable slot into a register.
@@ -267,7 +271,7 @@ pub enum Instruction {
 
     //  Control
     /// Return from the current call frame.
-    Return(Option<usize>),
+    Return { value: Option<usize>, loc: Loc },
     /// Await a Promise — yields to the event loop if pending.
     Await { dst: usize, promise: usize, loc: Loc },
     /// Yield a value from a generator function.
