@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const _disassemble: (a: number, b: number) => any;
 export const _eval: (a: number, b: number) => any;
+export const _format: (a: number, b: number) => [number, number];
 export const _parseAst: (a: number, b: number) => any;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;

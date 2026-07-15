@@ -16,7 +16,7 @@ nav .logo .hide-mobile { display: inline; }
 .playground-wrap {
   display: flex;
   gap: var(--space-4);
-  min-height: 65vh;
+  height: 70vh;
   margin: var(--space-6) 0;
 }
 
@@ -34,8 +34,8 @@ nav .logo .hide-mobile { display: inline; }
 #editor-container { flex: 1; }
 
 .playground-output {
-  width: 45%;
-  min-width: 360px;
+  width: 55%;
+  min-width: 400px;
   display: flex;
   flex-direction: column;
   background: var(--surface-1);
@@ -53,6 +53,7 @@ nav .logo .hide-mobile { display: inline; }
   line-height: 1.6;
   white-space: pre;
   color: var(--text);
+  max-height: calc(70vh - 80px);
 }
 
 .playground-output .output-content.is-wrapped {
@@ -93,10 +94,11 @@ nav .logo .hide-mobile { display: inline; }
 .playground-tab:hover { color: var(--text-secondary); }
 .playground-tab.active { color: var(--brand); border-bottom-color: var(--brand); }
 
-.output-line { display: flex; gap: 0.75rem; align-items: baseline; }
+.output-line { display: flex; gap: 0; align-items: baseline; }
 .output-line .line-num {
-  flex-shrink: 0; min-width: 3.5em; text-align: right;
-  color: var(--text-tertiary); font-size: 0.72rem;
+  flex-shrink: 0; min-width: 2.5em; text-align: right;
+  color: #484f58; font-size: 0.72rem;
+  padding-right: 1em;
   user-select: none;
 }
 .output-line .line-val { color: var(--text); }
@@ -405,8 +407,8 @@ function showAst(src) {
     $out.querySelectorAll('.ast-toggle').forEach(el => {
       el.onclick = (e) => {
         e.stopPropagation();
-        const target = el.nextElementSibling;
-        if (target && target.classList.contains('ast-children')) {
+        const target = el.parentNode.querySelector('.ast-children');
+        if (target) {
           const expanded = target.style.display !== 'none';
           target.style.display = expanded ? 'none' : '';
           el.textContent = expanded ? '▶' : '▼';

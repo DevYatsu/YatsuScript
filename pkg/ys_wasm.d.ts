@@ -8,6 +8,8 @@ export function _disassemble(source: string): any;
  */
 export function _eval(source: string): any;
 
+export function _format(source: string): string;
+
 export function _parseAst(source: string): any;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -16,6 +18,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly _disassemble: (a: number, b: number) => any;
     readonly _eval: (a: number, b: number) => any;
+    readonly _format: (a: number, b: number) => [number, number];
     readonly _parseAst: (a: number, b: number) => any;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
