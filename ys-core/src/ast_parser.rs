@@ -323,6 +323,11 @@ impl<'source> AstParser<'source> {
             if !params.is_empty() { self.expect(Token::Comma)?; self.stream.skip_newlines(); }
             if self.peek() == Some(end) { break; }
             params.push(self.expect_ident()?.to_string());
+            // Optional type annotation `: TypeName` — parsed but ignored at runtime
+            if self.peek() == Some(Token::Colon) {
+                self.advance()?;
+                self.expect_ident()?;
+            }
         }
         Ok(params)
     }

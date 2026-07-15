@@ -298,7 +298,16 @@ fn ast_node_to_js(node: &ys_core::ast::AstNode) -> JsValue {
             js_sys::Reflect::set(&o, &"type".into(), &format!("{:?}", node).into()).ok();
         }
     }
-    o.into()
+    out.into()
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Format — format YatsuScript source code via ys-core
+// ═══════════════════════════════════════════════════════════════
+
+#[wasm_bindgen(js_name = _format)]
+pub fn format(source: &str) -> String {
+    ys_core::fmt::format_source(source)
 }
 
 // ═══════════════════════════════════════════════════════════════

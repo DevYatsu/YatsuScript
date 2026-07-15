@@ -14,6 +14,7 @@ pub mod ast_parser;
 pub mod codegen;
 pub mod compiler;
 pub mod error;
+pub mod fmt;
 pub mod lexer;
 pub mod optimizer;
 pub mod token_stream;

@@ -635,6 +635,7 @@ nav .github:hover {
 
 .example-block pre {
   margin: 0;
+  padding: var(--space-5);
   border: none;
   border-radius: 0;
   background: transparent;
