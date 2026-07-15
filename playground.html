@@ -180,7 +180,7 @@ function showBytecode(src) {
 
 (async () => {
   try {
-    const m = await import('../ys-wasm/pkg/ys_wasm.js');
+    const m = await import('./pkg/ys_wasm.js');
     await m.default();
     wasm = m;
     $status.textContent = 'Ready';
