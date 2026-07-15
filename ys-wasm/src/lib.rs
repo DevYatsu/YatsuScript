@@ -102,9 +102,60 @@ fn ast_block_to_js(block: &[ys_core::ast::AstNode]) -> JsValue {
     arr.into()
 }
 
+fn add_loc(o: &js_sys::Object, node: &ys_core::ast::AstNode) {
+    if let Some(loc) = node_loc(node) {
+        js_sys::Reflect::set(o, &"line".into(), &JsValue::from(loc.line)).ok();
+        js_sys::Reflect::set(o, &"col".into(), &JsValue::from(loc.col)).ok();
+    }
+}
+
+fn node_loc(node: &ys_core::ast::AstNode) -> Option<ys_core::compiler::Loc> {
+    use ys_core::ast::*;
+    match node {
+        AstNode::Number(_, l) => Some(*l),
+        AstNode::Bool(_, l) => Some(*l),
+        AstNode::Nil(l) => Some(*l),
+        AstNode::Str(_, l) => Some(*l),
+        AstNode::Ident(_, l) => Some(*l),
+        AstNode::Break(l) => Some(*l),
+        AstNode::Block(_, l) => Some(*l),
+        AstNode::ListLit(_, l) => Some(*l),
+        AstNode::ObjectLit(_, l) => Some(*l),
+        AstNode::Yield(_, l) => Some(*l),
+        AstNode::Await(_, l) => Some(*l),
+        AstNode::Assign { loc, .. } => Some(*loc),
+        AstNode::Unary { loc, .. } => Some(*loc),
+        AstNode::If { loc, .. } => Some(*loc),
+        AstNode::While { loc, .. } => Some(*loc),
+        AstNode::For { loc, .. } => Some(*loc),
+        AstNode::Return { loc, .. } => Some(*loc),
+        AstNode::FunCall { loc, .. } => Some(*loc),
+        AstNode::MethodCall { loc, .. } => Some(*loc),
+        AstNode::DynamicCall { loc, .. } => Some(*loc),
+        AstNode::FunDecl { loc, .. } => Some(*loc),
+        AstNode::AsyncFun { loc, .. } => Some(*loc),
+        AstNode::Closure { loc, .. } => Some(*loc),
+        AstNode::Index { loc, .. } => Some(*loc),
+        AstNode::Field { loc, .. } => Some(*loc),
+        AstNode::Range { loc, .. } => Some(*loc),
+        AstNode::Switch { loc, .. } => Some(*loc),
+        AstNode::Fail { loc, .. } => Some(*loc),
+        AstNode::Use { loc, .. } => Some(*loc),
+        AstNode::ErrorDecl { loc, .. } => Some(*loc),
+        AstNode::ErrorEnum { loc, .. } => Some(*loc),
+        AstNode::Fallback { loc, .. } => Some(*loc),
+        AstNode::Except { loc, .. } => Some(*loc),
+        AstNode::ListRepeat { loc, .. } => Some(*loc),
+        AstNode::Template { loc, .. } => Some(*loc),
+        AstNode::Binary { loc, .. } => Some(*loc),
+        _ => None,
+    }
+}
+
 fn ast_node_to_js(node: &ys_core::ast::AstNode) -> JsValue {
     use ys_core::ast::*;
     let o = js_sys::Object::new();
+    add_loc(&o, node);
     match node {
         AstNode::Number(n, _) => {
             js_sys::Reflect::set(&o, &"type".into(), &"number".into()).ok();

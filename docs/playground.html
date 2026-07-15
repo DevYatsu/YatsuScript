@@ -31,8 +31,8 @@ nav .logo .hide-mobile { display: inline; }
 }
 
 .playground-output {
-  width: 360px;
-  min-width: 280px;
+  width: 45%;
+  min-width: 360px;
   display: flex;
   flex-direction: column;
   background: var(--surface-1);
@@ -48,8 +48,12 @@ nav .logo .hide-mobile { display: inline; }
   font-family: var(--mono);
   font-size: 0.8rem;
   line-height: 1.6;
-  white-space: pre-wrap;
+  white-space: pre;
   color: var(--text);
+}
+
+.playground-output .output-content.is-wrapped {
+  white-space: pre-wrap;
 }
 
 .playground-bar {
@@ -200,6 +204,8 @@ function showTab(tab) {
   if (tab === 'output') $tabOut.classList.add('active');
   if (tab === 'ast') $tabAst.classList.add('active');
   if (tab === 'bytecode') $tabBc.classList.add('active');
+  // Bytecode: no wrapping (pre), Output/AST: wrapping (pre-wrap)
+  $out.classList.toggle('is-wrapped', tab !== 'bytecode');
 }
 
 $tabOut.onclick = () => { showTab('output'); refresh(); };
