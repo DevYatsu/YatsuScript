@@ -157,15 +157,15 @@ x = some_failing_expression <span class="kw">or</span> 0
 
 <span class="cm">// Pattern matching with 'except'</span>
 x = divide(a, b) <span class="kw">except</span> {
-  |DivisionByZero| 0
-  |_| -1
+  |DivisionByZero <span class="kw">-></span> 0
+  |_ <span class="kw">-></span> -1
 }
 </pre>
 
 <h2>Modules</h2>
-<p>Use <code>use</code> to import from other modules. Items marked <code>exp</code> are public.</p>
-<pre><span class="kw">use</span> utils.parse
-<span class="kw">use</span> utils.format
+<p>Use <code>use</code> to import from other modules by dot-separated path.
+Items marked <code>exp</code> are visible to importers.</p>
+<pre><span class="kw">use</span> models.user
 
 <span class="kw">exp</span> <span class="kw">fun</span> <span class="fn">public_api</span>() {
   <span class="kw">ret</span> <span class="str">"visible to importers"</span>
