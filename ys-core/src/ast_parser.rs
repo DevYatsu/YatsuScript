@@ -469,7 +469,27 @@ impl<'source> AstParser<'source> {
     // ── Fallthrough (or / except) — lowest precedence
 
     fn parse_fallthrough_expr(&mut self) -> Result<AstNode, JitError> {
-        let lhs = self.parse_range_expr()?;
+        let mut lhs = self.parse_range_expr()?;
+
+        // Pipe operator |>
+        while self.peek() == Some(Token::PipeForward) {
+            let loc = self.loc();
+            self.advance()?; // consume |>
+            let rhs = self.parse_pipe_rhs()?;
+            match rhs {
+                AstNode::FunCall { name, mut args, loc } => {
+                    args.insert(0, lhs);
+                    lhs = AstNode::FunCall { name, args, loc };
+                }
+                _ => {
+                    return Err(JitError::parsing(
+                        "Expected a function call after `|>`",
+                        loc.line as usize, loc.col as usize,
+                    ));
+                }
+            }
+        }
+
         let loc = self.loc();
 
         // `or` — inline fallback for failures (disambiguates from boolean
@@ -714,20 +734,16 @@ impl<'source> AstParser<'source> {
                     self.expect(Token::RBracket)?;
                     left = AstNode::Index { obj: Box::new(left), index: Box::new(index), loc };
                 }
-                // obj.field or obj.method()
+                // obj.field (method calls via dot are removed — use pipe)
                 Some(Token::Dot) => {
                     self.advance()?;
                     let field = self.expect_ident()?.to_string();
                     if self.peek() == Some(Token::LParen) {
-                        // obj.method(args)
-                        self.advance()?;
-                        let args = self.parse_call_args()?;
-                        left = AstNode::MethodCall {
-                            obj: Box::new(left),
-                            method: field,
-                            args,
-                            loc,
-                        };
+                        return Err(JitError::parsing(
+                            "Method calls with dot notation are not supported.\n\
+                             Use the pipe operator `|>` instead:\n  obj |> method()",
+                            loc.line as usize, loc.col as usize,
+                        ));
                     } else {
                         left = AstNode::Field { obj: Box::new(left), name: field, loc };
                     }
@@ -877,5 +893,15 @@ impl<'source> AstParser<'source> {
         }
         self.expect(Token::RParen)?;
         Ok(args)
+    }
+
+    /// Parse the right-hand side of a `|>` pipe: `ident(args)`.
+    /// Returns a `FunCall` **without** the piped value prepended.
+    fn parse_pipe_rhs(&mut self) -> Result<AstNode, JitError> {
+        let loc = self.loc();
+        let name = self.expect_ident()?.to_string();
+        self.expect(Token::LParen)?;
+        let args = self.parse_call_args()?;
+        Ok(AstNode::FunCall { name, args, loc })
     }
 }
