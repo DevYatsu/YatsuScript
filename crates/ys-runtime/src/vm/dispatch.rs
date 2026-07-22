@@ -193,7 +193,6 @@ pub fn dispatch_callable(
                 pc: 0,
                 return_to: ret,
                 obj_cache: Vec::with_capacity(4),
-                sc_stack: Vec::new(),
             });
         }
     }

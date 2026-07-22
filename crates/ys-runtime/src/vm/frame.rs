@@ -76,11 +76,7 @@ pub struct CallFrame {
     /// Inline cache for `ObjectGet` — remembers recent (object_id, name_id, value)
     /// lookups to skip `FxHashMap` probing on repeated property access.
     pub obj_cache:     Vec<(u32, u32, Value)>,
-    /// Self-call optimisation: when a function calls itself we skip frame
-    /// push/pop and Vec allocation.  Stack stores (saved_regs, return_pc,
-    /// return_dst) — the caller's registers are saved and restored since
-    /// non-tail-recursive functions need their local state preserved.
-    pub sc_stack: Vec<(Vec<Value>, usize, Option<usize>)>,
+
 
 }
 

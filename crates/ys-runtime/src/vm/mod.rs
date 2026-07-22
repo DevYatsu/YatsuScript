@@ -173,7 +173,6 @@ pub fn execute_bytecode(
             pc: start_pc,
             return_to: None,
             obj_cache: Vec::with_capacity(4),
-                sc_stack: Vec::new(),
         });
         set_current_frames(&frames);
 
@@ -297,15 +296,6 @@ pub fn execute_bytecode(
             }
             Instruction::Return { value: val_reg, .. } => {
                 let ret = val_reg.map_or(Value::nil(), |r| frames[fi][r]);
-                // Self-call return: restore saved register state and pc.
-                if !frames[fi].sc_stack.is_empty() {
-                    let fr = unsafe { frames.get_unchecked_mut(fi) };
-                    let (mut saved_regs, saved_pc, saved_dst) = fr.sc_stack.pop().unwrap();
-                    if let Some(dst) = saved_dst { saved_regs[dst] = ret; }
-                    fr.registers = saved_regs;
-                    fr.pc = saved_pc;
-                    continue;
-                }
                 let frame = frames.pop().unwrap();
                 pool_regs(frame.registers);
                 if let Some(t) = frame.return_to {
@@ -1117,25 +1107,6 @@ pub fn execute_bytecode(
                                 loc.as_error_pos(),
                             ));
                         }
-                        // Self-call optimisation: detect when a function calls
-                        // itself recursively.  Save the caller's register state,
-                        // set up callee arguments, and jump to pc=0.
-                        let is_self = f.instructions.as_ptr() as *const u8 as usize
-                            == frames[fi].instructions.slice().as_ptr() as *const u8 as usize;
-                        if is_self {
-                            let fr = unsafe { frames.get_unchecked_mut(fi) };
-                            let saved = std::mem::replace(
-                                &mut fr.registers,
-                                Vec::with_capacity(f.locals_count),
-                            );
-                            for &r in box_data.args_regs.iter() {
-                                fr.registers.push(unsafe { *saved.get_unchecked(r) });
-                            }
-                            fr.registers.resize(f.locals_count, Value::nil());
-                            fr.sc_stack.push((saved, fr.pc + 1, dst));
-                            fr.pc = 0;
-                            continue;
-                        }
                         let ret = dst.map(|d| ReturnTarget { dst: d });
                         let callee_regs = build_call_registers(
                             f.locals_count,
@@ -1150,7 +1121,6 @@ pub fn execute_bytecode(
                             pc: 0,
                             return_to: ret,
                             obj_cache: Vec::with_capacity(4),
-                sc_stack: Vec::new(),
                         });
                         frames[fi].pc += 1;
                         continue;
@@ -1216,7 +1186,6 @@ pub fn execute_bytecode(
                             pc: 0,
                             return_to: ret,
                             obj_cache: Vec::with_capacity(4),
-                sc_stack: Vec::new(),
                         });
                     }
                 }
@@ -1298,7 +1267,6 @@ pub fn execute_bytecode(
                             pc: 0,
                             return_to: ret,
                             obj_cache: Vec::with_capacity(4),
-                sc_stack: Vec::new(),
                         });
                         continue;
                     }
