@@ -3,7 +3,9 @@
 //! Uses `ureq` for blocking HTTP requests and `std::net` for TCP on native.
 //! On wasm32, uses `web-sys::XmlHttpRequest` to call the browser's fetch API.
 
-use crate::context::{Context, NativeCtx};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::context::Context;
+use crate::context::NativeCtx;
 use crate::heap::ManagedObject;
 use crate::natives::{NativeRegistry, alloc_string};
 use crate::vm::PromiseState;
