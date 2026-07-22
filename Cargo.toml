@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "ys-core",
-    "ys-runtime",
-    "ys-cli",
-    "ys-lsp",
-    "ys-wasm",
+    "crates/ys-core",
+    "crates/ys-runtime",
+    "crates/ys-cli",
+    "crates/ys-lsp",
+    "crates/ys-wasm",
 ]
 resolver = "2"
 
