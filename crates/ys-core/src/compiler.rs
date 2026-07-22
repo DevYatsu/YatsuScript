@@ -213,7 +213,12 @@ impl Value {
 //  Instructions
 
 /// The instruction set for the register-based ysc VM.
+///
+/// `repr(u8)` forces the tag to a single byte so the dispatch loop can read
+/// it directly and index a handler table — no `match` cost on the critical
+/// path.
 #[derive(Debug, Clone, PartialEq)]
+#[repr(u8)]
 pub enum Instruction {
     /// Load a constant `Value` into a destination register.
     LoadLiteral {
